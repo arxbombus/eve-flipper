@@ -314,6 +314,7 @@ function App() {
     buy_sales_tax_percent: 0,
     sell_sales_tax_percent: 8,
     min_item_profit: 0,
+    min_item_profit_mode: "unit",
     min_route_security: 0.45,
     avg_price_period: 14,
     purchase_demand_days: 0.5,
@@ -327,6 +328,7 @@ function App() {
     ],
     target_market_system: "Jita",
     target_market_location_id: 0,
+    exclude_keywords: [],
     contract_hold_days: 7,
     contract_target_confidence: 80,
     exclude_rigs_with_ship: true,
@@ -336,6 +338,7 @@ function App() {
     route_min_isk_per_jump: 0,
     route_allow_empty_hops: false,
     sell_order_mode: false,
+    trade_mode: "instant_instant",
   });
   const configLoadedRef = useRef(false);
   const regionDefaultsAppliedRef = useRef(false);
@@ -770,6 +773,8 @@ function App() {
           min_daily_volume: cfg.min_daily_volume ?? prev.min_daily_volume,
           max_investment: cfg.max_investment ?? prev.max_investment,
           min_item_profit: cfg.min_item_profit ?? prev.min_item_profit,
+          min_item_profit_mode:
+            cfg.min_item_profit_mode ?? prev.min_item_profit_mode ?? "unit",
           min_s2b_per_day: cfg.min_s2b_per_day ?? prev.min_s2b_per_day,
           min_bfs_per_day: cfg.min_bfs_per_day ?? prev.min_bfs_per_day,
           min_s2b_bfs_ratio:
@@ -793,7 +798,12 @@ function App() {
           target_market_location_id:
             cfg.target_market_location_id ?? prev.target_market_location_id,
           category_ids: cfg.category_ids ?? prev.category_ids,
-          sell_order_mode: cfg.sell_order_mode ?? prev.sell_order_mode,
+          exclude_keywords: cfg.exclude_keywords ?? prev.exclude_keywords ?? [],
+          trade_mode: cfg.trade_mode ?? prev.trade_mode ?? "instant_instant",
+          sell_order_mode:
+            cfg.trade_mode != null
+              ? cfg.trade_mode !== "instant_instant"
+              : prev.sell_order_mode,
         }));
         setAlertChannels({
           telegram: cfg.alert_telegram ?? false,
@@ -837,6 +847,10 @@ function App() {
     saveTimerRef.current = setTimeout(() => {
       updateConfig({
         ...params,
+        sell_order_mode:
+          params.trade_mode != null
+            ? params.trade_mode !== "instant_instant"
+            : params.sell_order_mode,
         alert_telegram: alertChannels.telegram,
         alert_discord: alertChannels.discord,
         alert_desktop: alertChannels.desktop,
@@ -2024,6 +2038,7 @@ function App() {
                 "min_daily_volume",
                 "max_investment",
                 "min_item_profit",
+                "min_item_profit_mode",
                 "min_period_roi",
                 "max_dos",
                 "min_demand_per_day",
@@ -2048,7 +2063,9 @@ function App() {
                 "target_market_system",
                 "target_market_location_id",
                 "category_ids",
+                "exclude_keywords",
                 "sell_order_mode",
+                "trade_mode",
                 "include_structures",
                 "route_min_hops",
                 "route_max_hops",

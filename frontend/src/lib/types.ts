@@ -399,6 +399,12 @@ export interface ExecutionPlanResult {
   impact?: ImpactEstimate;
 }
 
+export type RegionalTradeMode =
+  | "instant_instant"
+  | "instant_sell_order"
+  | "buy_order_sell_order";
+export type MinItemProfitMode = "unit" | "order";
+
 export interface ScanParams {
   system_name: string;
   ignored_system_ids?: number[];
@@ -416,6 +422,7 @@ export interface ScanParams {
   min_daily_volume?: number;
   max_investment?: number;
   min_item_profit?: number;
+  min_item_profit_mode?: MinItemProfitMode;
   min_period_roi?: number;
   max_dos?: number;
   min_demand_per_day?: number;
@@ -454,10 +461,14 @@ export interface ScanParams {
   include_structures?: boolean;
   /** Category filter for regional day trader. Empty = all. */
   category_ids?: number[];
+  /** Exclude item names that contain any keyword (case-insensitive). */
+  exclude_keywords?: string[];
   /** When true, use lowest sell order at destination as revenue price instead of highest buy order. */
   sell_order_mode?: boolean;
   /** Flipper only: when true restrict sell-side to target_market_system only; when false allow any buy order within sell radius. Default true. */
   restrict_to_target_market?: boolean;
+  /** Explicit regional trade mode. Preferred over sell_order_mode when provided. */
+  trade_mode?: RegionalTradeMode;
 }
 
 export interface AppConfig {
@@ -477,6 +488,7 @@ export interface AppConfig {
   min_daily_volume?: number;
   max_investment?: number;
   min_item_profit?: number;
+  min_item_profit_mode?: MinItemProfitMode;
   min_s2b_per_day?: number;
   min_bfs_per_day?: number;
   min_s2b_bfs_ratio?: number;
@@ -493,7 +505,9 @@ export interface AppConfig {
   target_market_system?: string;
   target_market_location_id?: number;
   category_ids?: number[];
+  exclude_keywords?: string[];
   sell_order_mode?: boolean;
+  trade_mode?: RegionalTradeMode;
   alert_telegram: boolean;
   alert_discord: boolean;
   alert_desktop: boolean;

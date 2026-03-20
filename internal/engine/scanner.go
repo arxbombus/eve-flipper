@@ -237,6 +237,12 @@ type scanIndex struct {
 	sellCounts map[locKey]int
 	buyByType  map[int32][]buyInfo // all buy orders grouped by typeID
 	buyCounts  map[locKey]int
+	// Source-side buy orders (used by buy_order_sell_order mode).
+	sourceBuyByType map[int32][]buyInfo
+	sourceBuyCounts map[locKey]int
+	// Destination sell orders (used by sell-order liquidation modes).
+	sellSideSellByType map[int32][]sellInfo
+	sellSideSellCounts map[locKey]int
 	// Sell-side market depth (the market where we liquidate and where history is read).
 	// Used for S2B/BfS split so both sides come from the same market context.
 	sellSideBuyDepthByType  map[int32]int64
@@ -335,13 +341,14 @@ func (s *Scanner) fetchAndIndex(
 	buyRegions map[int32]bool, buySystems map[int32]int,
 	sellRegions map[int32]bool, sellSystems map[int32]int,
 ) *scanIndex {
+	tradeMode := params.EffectiveTradeMode()
 	sellCh := s.fetchOrdersStream(buyRegions, "sell", buySystems)
 	buyCh := s.fetchOrdersStream(sellRegions, "buy", sellSystems)
 	// Additional sell-side sell-book stream for mathematically consistent S2B/BfS split.
 	sellSideSellCh := s.fetchOrdersStream(sellRegions, "sell", sellSystems)
 	var sourceBuyCh <-chan []esi.MarketOrder
 	enablePrivateStructureFetch := params.IncludeStructures && strings.TrimSpace(params.AccessToken) != ""
-	if enablePrivateStructureFetch {
+	if enablePrivateStructureFetch || tradeMode == TradeModeBuyOrderToSell {
 		// Source-side buy orders help discover structure IDs when source sell book is hidden in region endpoint.
 		sourceBuyCh = s.fetchOrdersStream(buyRegions, "buy", buySystems)
 	} else if params.IncludeStructures {
@@ -355,6 +362,10 @@ func (s *Scanner) fetchAndIndex(
 		sellCounts:                       make(map[locKey]int),
 		buyByType:                        make(map[int32][]buyInfo),
 		buyCounts:                        make(map[locKey]int),
+		sourceBuyByType:                  make(map[int32][]buyInfo),
+		sourceBuyCounts:                  make(map[locKey]int),
+		sellSideSellByType:               make(map[int32][]sellInfo),
+		sellSideSellCounts:               make(map[locKey]int),
 		sellSideBuyDepthByType:           make(map[int32]int64),
 		sellSideSellDepthByType:          make(map[int32]int64),
 		sellSideSellDepthByLoc:           make(map[locKey]int64),
@@ -430,6 +441,11 @@ func (s *Scanner) fetchAndIndex(
 		defer wg.Done()
 		for batch := range sellSideSellCh {
 			for _, o := range batch {
+				idx.sellSideSellCounts[locKey{o.TypeID, o.LocationID}]++
+				idx.sellSideSellByType[o.TypeID] = append(idx.sellSideSellByType[o.TypeID], sellInfo{
+					Price: o.Price, VolumeRemain: o.VolumeRemain,
+					LocationID: o.LocationID, SystemID: o.SystemID,
+				})
 				idx.sellSideSellDepthByType[o.TypeID] += int64(o.VolumeRemain)
 				locK := locKey{o.TypeID, o.LocationID}
 				idx.sellSideSellDepthByLoc[locK] += int64(o.VolumeRemain)
@@ -443,6 +459,11 @@ func (s *Scanner) fetchAndIndex(
 				}
 			}
 		}
+		for tid, sells := range idx.sellSideSellByType {
+			for i := range sells {
+				sells[i].OrderCount = idx.sellSideSellCounts[locKey{tid, sells[i].LocationID}]
+			}
+		}
 	}()
 
 	// Consumer 4 (optional): source-side buy orders used to discover private structure markets.
@@ -451,6 +472,11 @@ func (s *Scanner) fetchAndIndex(
 			defer wg.Done()
 			for batch := range sourceBuyCh {
 				for _, o := range batch {
+					idx.sourceBuyCounts[locKey{o.TypeID, o.LocationID}]++
+					idx.sourceBuyByType[o.TypeID] = append(idx.sourceBuyByType[o.TypeID], buyInfo{
+						Price: o.Price, VolumeRemain: o.VolumeRemain,
+						LocationID: o.LocationID, SystemID: o.SystemID,
+					})
 					if isPlayerStructureLocationID(o.LocationID) {
 						systemID := s.resolveStructureSystemID(o.LocationID, o.SystemID)
 						sourceStructureMu.Lock()
@@ -460,6 +486,11 @@ func (s *Scanner) fetchAndIndex(
 						}
 						sourceStructureMu.Unlock()
 					}
+				}
+			}
+			for tid, buys := range idx.sourceBuyByType {
+				for i := range buys {
+					buys[i].OrderCount = idx.sourceBuyCounts[locKey{tid, buys[i].LocationID}]
 				}
 			}
 		}()
@@ -475,6 +506,15 @@ func (s *Scanner) fetchAndIndex(
 	}
 	if enablePrivateStructureFetch && len(sourceStructureSystemIDs) > 0 {
 		s.mergeSourceStructureSellOrders(idx, sourceStructureSystemIDs, buySystems, params.AccessToken)
+	}
+	if enablePrivateStructureFetch && isPlayerStructureLocationID(params.TargetMarketLocationID) {
+		s.mergeTargetStructureSellOrders(
+			idx,
+			params.TargetMarketLocationID,
+			params.TargetMarketSystemID,
+			sellSystems,
+			params.AccessToken,
+		)
 	}
 
 	log.Printf("[DEBUG] fetchAndIndex: %d sell orders, %d buy orders", len(idx.sellOrders), len(idx.buyOrders))
@@ -610,6 +650,79 @@ func (s *Scanner) mergeSourceStructureSellOrders(
 	)
 }
 
+func (s *Scanner) mergeTargetStructureSellOrders(
+	idx *scanIndex,
+	targetLocationID int64,
+	targetSystemID int32,
+	sellSystems map[int32]int,
+	accessToken string,
+) {
+	if idx == nil || targetLocationID <= 0 || strings.TrimSpace(accessToken) == "" || s.ESI == nil {
+		return
+	}
+
+	resolvedSystemID := s.resolveStructureSystemID(targetLocationID, targetSystemID)
+	orders, err := s.ESI.FetchStructureOrders(targetLocationID, accessToken)
+	if err != nil {
+		log.Printf("[DEBUG] mergeTargetStructureSellOrders: structure %d fetch failed: %v", targetLocationID, err)
+		return
+	}
+
+	added := 0
+	for _, o := range orders {
+		if o.IsBuyOrder {
+			continue
+		}
+		if o.LocationID == 0 {
+			o.LocationID = targetLocationID
+		}
+		if o.SystemID <= 0 {
+			o.SystemID = resolvedSystemID
+		}
+		if o.SystemID <= 0 {
+			o.SystemID = s.resolveStructureSystemID(targetLocationID, o.SystemID)
+		}
+		if o.SystemID <= 0 {
+			continue
+		}
+		if len(sellSystems) > 0 {
+			if _, ok := sellSystems[o.SystemID]; !ok {
+				continue
+			}
+		}
+
+		idx.sellSideSellCounts[locKey{o.TypeID, o.LocationID}]++
+		idx.sellSideSellByType[o.TypeID] = append(idx.sellSideSellByType[o.TypeID], sellInfo{
+			Price: o.Price, VolumeRemain: o.VolumeRemain,
+			LocationID: o.LocationID, SystemID: o.SystemID,
+		})
+		idx.sellSideSellDepthByType[o.TypeID] += int64(o.VolumeRemain)
+		locK := locKey{o.TypeID, o.LocationID}
+		idx.sellSideSellDepthByLoc[locK] += int64(o.VolumeRemain)
+		if cur, ok := idx.sellSideSellMinPriceByLoc[locK]; !ok || o.Price < cur {
+			idx.sellSideSellMinPriceByLoc[locK] = o.Price
+		}
+		sysK := sysTypeKey{o.TypeID, o.SystemID}
+		idx.sellSideSellDepthByTypeSystem[sysK] += int64(o.VolumeRemain)
+		if cur, ok := idx.sellSideSellMinPriceByTypeSystem[sysK]; !ok || o.Price < cur {
+			idx.sellSideSellMinPriceByTypeSystem[sysK] = o.Price
+		}
+		added++
+	}
+
+	for tid, sells := range idx.sellSideSellByType {
+		for i := range sells {
+			sells[i].OrderCount = idx.sellSideSellCounts[locKey{tid, sells[i].LocationID}]
+		}
+	}
+
+	log.Printf(
+		"[DEBUG] mergeTargetStructureSellOrders: structure=%d added=%d",
+		targetLocationID,
+		added,
+	)
+}
+
 // calculateResults is the shared profit calculation logic.
 // bfsDistances = pre-computed distances from origin (used for buyJumps lookup).
 func (s *Scanner) calculateResults(
@@ -657,13 +770,52 @@ func (s *Scanner) calculateResults(
 		buyInfo
 		BestPriceVolume int32
 	}
+	tradeMode := params.EffectiveTradeMode()
+	useSourceBuyOrders := params.UsesSourceBuyOrders()
+	useSellOrderRevenue := params.UsesSellOrderRevenue()
 
-	for typeID, sells := range idx.sellByType {
+	candidateTypes := make(map[int32]struct{})
+	if useSourceBuyOrders {
+		for typeID := range idx.sourceBuyByType {
+			candidateTypes[typeID] = struct{}{}
+		}
+	} else {
+		for typeID := range idx.sellByType {
+			candidateTypes[typeID] = struct{}{}
+		}
+	}
+	if useSellOrderRevenue {
+		for typeID := range idx.sellSideSellByType {
+			candidateTypes[typeID] = struct{}{}
+		}
+	} else {
+		for typeID := range idx.buyByType {
+			candidateTypes[typeID] = struct{}{}
+		}
+	}
+
+	for typeID := range candidateTypes {
 		if isMarketDisabledType(typeID) {
 			continue
 		}
-		buys := idx.buyByType[typeID]
-		if len(buys) == 0 {
+
+		sourceSells := idx.sellByType[typeID]
+		sourceBuys := idx.sourceBuyByType[typeID]
+		destBuys := idx.buyByType[typeID]
+		destSells := idx.sellSideSellByType[typeID]
+
+		if useSourceBuyOrders {
+			if len(sourceBuys) == 0 {
+				continue
+			}
+		} else if len(sourceSells) == 0 {
+			continue
+		}
+		if useSellOrderRevenue {
+			if len(destSells) == 0 {
+				continue
+			}
+		} else if len(destBuys) == 0 {
 			continue
 		}
 
@@ -684,11 +836,10 @@ func (s *Scanner) calculateResults(
 			}
 		}
 
-		// Deduplicate sells: keep cheapest per location (with total volume)
-		bestSellByLoc := make(map[int64]*sellLocBest)
-		for _, sell := range sells {
-			if existing, ok := bestSellByLoc[sell.LocationID]; ok {
-				// Accumulate full depth and track L1 quantity at the best ask.
+		// Source asks for instant acquisition (legacy source model).
+		bestSourceSellByLoc := make(map[int64]*sellLocBest)
+		for _, sell := range sourceSells {
+			if existing, ok := bestSourceSellByLoc[sell.LocationID]; ok {
 				existing.VolumeRemain += sell.VolumeRemain
 				if sell.Price < existing.Price {
 					existing.Price = sell.Price
@@ -700,18 +851,17 @@ func (s *Scanner) calculateResults(
 				}
 			} else {
 				cp := sell
-				bestSellByLoc[sell.LocationID] = &sellLocBest{
+				bestSourceSellByLoc[sell.LocationID] = &sellLocBest{
 					sellInfo:        cp,
 					BestPriceVolume: sell.VolumeRemain,
 				}
 			}
 		}
 
-		// Deduplicate buys: keep most expensive per location (with total volume)
-		bestBuyByLoc := make(map[int64]*buyLocBest)
-		for _, buy := range buys {
-			if existing, ok := bestBuyByLoc[buy.LocationID]; ok {
-				// Accumulate full depth and track L1 quantity at the best bid.
+		// Source bids for buy-order acquisition mode.
+		bestSourceBuyByLoc := make(map[int64]*buyLocBest)
+		for _, buy := range sourceBuys {
+			if existing, ok := bestSourceBuyByLoc[buy.LocationID]; ok {
 				existing.VolumeRemain += buy.VolumeRemain
 				if buy.Price > existing.Price {
 					existing.Price = buy.Price
@@ -723,28 +873,91 @@ func (s *Scanner) calculateResults(
 				}
 			} else {
 				cp := buy
-				bestBuyByLoc[buy.LocationID] = &buyLocBest{
+				bestSourceBuyByLoc[buy.LocationID] = &buyLocBest{
 					buyInfo:         cp,
 					BestPriceVolume: buy.VolumeRemain,
 				}
 			}
 		}
 
+		// Destination bids for instant liquidation (legacy destination model).
+		bestDestBuyByLoc := make(map[int64]*buyLocBest)
+		for _, buy := range destBuys {
+			if existing, ok := bestDestBuyByLoc[buy.LocationID]; ok {
+				existing.VolumeRemain += buy.VolumeRemain
+				if buy.Price > existing.Price {
+					existing.Price = buy.Price
+					existing.SystemID = buy.SystemID
+					existing.OrderCount = buy.OrderCount
+					existing.BestPriceVolume = buy.VolumeRemain
+				} else if buy.Price == existing.Price {
+					existing.BestPriceVolume += buy.VolumeRemain
+				}
+			} else {
+				cp := buy
+				bestDestBuyByLoc[buy.LocationID] = &buyLocBest{
+					buyInfo:         cp,
+					BestPriceVolume: buy.VolumeRemain,
+				}
+			}
+		}
+
+		// Destination asks for sell-order liquidation modes.
+		bestDestSellByLoc := make(map[int64]*sellLocBest)
+		for _, sell := range destSells {
+			if existing, ok := bestDestSellByLoc[sell.LocationID]; ok {
+				existing.VolumeRemain += sell.VolumeRemain
+				if sell.Price < existing.Price {
+					existing.Price = sell.Price
+					existing.SystemID = sell.SystemID
+					existing.OrderCount = sell.OrderCount
+					existing.BestPriceVolume = sell.VolumeRemain
+				} else if sell.Price == existing.Price {
+					existing.BestPriceVolume += sell.VolumeRemain
+				}
+			} else {
+				cp := sell
+				bestDestSellByLoc[sell.LocationID] = &sellLocBest{
+					sellInfo:        cp,
+					BestPriceVolume: sell.VolumeRemain,
+				}
+			}
+		}
+
 		// Quick check: can the best possible pair for this type be profitable?
-		cheapestSell := math.MaxFloat64
-		for _, sell := range bestSellByLoc {
-			if sell.Price < cheapestSell {
-				cheapestSell = sell.Price
+		cheapestSourcePrice := math.MaxFloat64
+		if useSourceBuyOrders {
+			for _, sourceBuy := range bestSourceBuyByLoc {
+				if sourceBuy.Price < cheapestSourcePrice {
+					cheapestSourcePrice = sourceBuy.Price
+				}
+			}
+		} else {
+			for _, sourceSell := range bestSourceSellByLoc {
+				if sourceSell.Price < cheapestSourcePrice {
+					cheapestSourcePrice = sourceSell.Price
+				}
 			}
 		}
-		expensiveBuy := 0.0
-		for _, buy := range bestBuyByLoc {
-			if buy.Price > expensiveBuy {
-				expensiveBuy = buy.Price
+		bestDestinationPrice := 0.0
+		if useSellOrderRevenue {
+			for _, destSell := range bestDestSellByLoc {
+				if destSell.Price > bestDestinationPrice {
+					bestDestinationPrice = destSell.Price
+				}
+			}
+		} else {
+			for _, destBuy := range bestDestBuyByLoc {
+				if destBuy.Price > bestDestinationPrice {
+					bestDestinationPrice = destBuy.Price
+				}
 			}
 		}
-		bestEffBuy := cheapestSell * buyCostMult
-		bestEffSell := expensiveBuy * sellRevenueMult
+		bestEffBuy := cheapestSourcePrice * buyCostMult
+		bestEffSell := bestDestinationPrice * sellRevenueMult
+		if cheapestSourcePrice <= 0 {
+			continue
+		}
 		if bestEffSell <= bestEffBuy {
 			continue
 		}
@@ -753,24 +966,91 @@ func (s *Scanner) calculateResults(
 			continue
 		}
 
-		// Cross-join deduplicated locations (much smaller than raw order count)
-		for sellLocID, sell := range bestSellByLoc {
-			for buyLocID, buy := range bestBuyByLoc {
-				if targetMarketLocationID > 0 && buyLocID != targetMarketLocationID {
+		sourceLocIDs := make([]int64, 0)
+		if useSourceBuyOrders {
+			sourceLocIDs = make([]int64, 0, len(bestSourceBuyByLoc))
+			for locID := range bestSourceBuyByLoc {
+				sourceLocIDs = append(sourceLocIDs, locID)
+			}
+		} else {
+			sourceLocIDs = make([]int64, 0, len(bestSourceSellByLoc))
+			for locID := range bestSourceSellByLoc {
+				sourceLocIDs = append(sourceLocIDs, locID)
+			}
+		}
+		destLocIDs := make([]int64, 0)
+		if useSellOrderRevenue {
+			destLocIDs = make([]int64, 0, len(bestDestSellByLoc))
+			for locID := range bestDestSellByLoc {
+				destLocIDs = append(destLocIDs, locID)
+			}
+		} else {
+			destLocIDs = make([]int64, 0, len(bestDestBuyByLoc))
+			for locID := range bestDestBuyByLoc {
+				destLocIDs = append(destLocIDs, locID)
+			}
+		}
+
+		// Cross-join deduplicated locations (much smaller than raw order count).
+		for _, sourceLocID := range sourceLocIDs {
+			for _, destLocID := range destLocIDs {
+				var sourcePrice float64
+				var sourceVolume int32
+				var sourceSystemID int32
+				var sourceOrderCount int
+				var sourceBestLevelQty int32
+				if useSourceBuyOrders {
+					source := bestSourceBuyByLoc[sourceLocID]
+					sourcePrice = source.Price
+					sourceVolume = source.VolumeRemain
+					sourceSystemID = source.SystemID
+					sourceOrderCount = source.OrderCount
+					sourceBestLevelQty = source.BestPriceVolume
+				} else {
+					source := bestSourceSellByLoc[sourceLocID]
+					sourcePrice = source.Price
+					sourceVolume = source.VolumeRemain
+					sourceSystemID = source.SystemID
+					sourceOrderCount = source.OrderCount
+					sourceBestLevelQty = source.BestPriceVolume
+				}
+
+				var destinationPrice float64
+				var destinationVolume int32
+				var destinationSystemID int32
+				var destinationOrderCount int
+				var destinationBestLevelQty int32
+				if useSellOrderRevenue {
+					destination := bestDestSellByLoc[destLocID]
+					destinationPrice = destination.Price
+					destinationVolume = destination.VolumeRemain
+					destinationSystemID = destination.SystemID
+					destinationOrderCount = destination.OrderCount
+					destinationBestLevelQty = destination.BestPriceVolume
+				} else {
+					destination := bestDestBuyByLoc[destLocID]
+					destinationPrice = destination.Price
+					destinationVolume = destination.VolumeRemain
+					destinationSystemID = destination.SystemID
+					destinationOrderCount = destination.OrderCount
+					destinationBestLevelQty = destination.BestPriceVolume
+				}
+
+				if targetMarketLocationID > 0 && destLocID != targetMarketLocationID {
 					continue
 				}
-				if targetMarketSystemID > 0 && buy.SystemID != targetMarketSystemID {
+				if targetMarketSystemID > 0 && destinationSystemID != targetMarketSystemID {
 					continue
 				}
-				if buy.Price <= sell.Price {
+				if !useSellOrderRevenue && destinationPrice <= sourcePrice {
 					continue
 				}
-				if sellLocID == buyLocID {
+				if sourceLocID == destLocID {
 					continue
 				}
 
-				effectiveBuyPrice := sell.Price * buyCostMult
-				effectiveSellPrice := buy.Price * sellRevenueMult
+				effectiveBuyPrice := sourcePrice * buyCostMult
+				effectiveSellPrice := destinationPrice * sellRevenueMult
 				profitPerUnit := effectiveSellPrice - effectiveBuyPrice
 				if profitPerUnit <= 0 {
 					continue
@@ -781,11 +1061,16 @@ func (s *Scanner) calculateResults(
 				}
 
 				units := maxUnits
-				if sell.VolumeRemain < units {
-					units = sell.VolumeRemain
+				if sourceVolume < units {
+					units = sourceVolume
 				}
-				if buy.VolumeRemain < units {
-					units = buy.VolumeRemain
+				// Instant liquidation is constrained by destination bid depth;
+				// sell-order liquidation is not.
+				if !useSellOrderRevenue && destinationVolume < units {
+					units = destinationVolume
+				}
+				if units <= 0 {
+					continue
 				}
 
 				// MaxInvestment filter
@@ -802,7 +1087,7 @@ func (s *Scanner) calculateResults(
 				totalProfit := profitPerUnit * float64(units)
 
 				// Dedup: keep only the best profit for this location pair + type
-				pk := pairKey{typeID, sellLocID, buyLocID}
+				pk := pairKey{typeID, sourceLocID, destLocID}
 				if existing, ok := bestPairs[pk]; ok {
 					if totalProfit <= existing.TotalProfit {
 						continue
@@ -810,8 +1095,8 @@ func (s *Scanner) calculateResults(
 				}
 
 				// Route check (BFS)
-				buyJumps := s.jumpsBetweenWithBFS(params.CurrentSystemID, sell.SystemID, bfsDistances, minSec)
-				sellJumps := s.jumpsBetweenWithSecurity(sell.SystemID, buy.SystemID, minSec)
+				buyJumps := s.jumpsBetweenWithBFS(params.CurrentSystemID, sourceSystemID, bfsDistances, minSec)
+				sellJumps := s.jumpsBetweenWithSecurity(sourceSystemID, destinationSystemID, minSec)
 				if buyJumps >= UnreachableJumps || sellJumps >= UnreachableJumps {
 					continue
 				}
@@ -830,12 +1115,12 @@ func (s *Scanner) calculateResults(
 					targetSellSupply = idx.sellSideSellDepthByLoc[locK]
 					targetLowestSell = idx.sellSideSellMinPriceByLoc[locK]
 				case targetMarketSystemID > 0:
-					sysK := sysTypeKey{typeID, buy.SystemID}
+					sysK := sysTypeKey{typeID, targetMarketSystemID}
 					targetSellSupply = idx.sellSideSellDepthByTypeSystem[sysK]
 					targetLowestSell = idx.sellSideSellMinPriceByTypeSystem[sysK]
 				default:
 					// In unconstrained mode keep metric local to the chosen liquidation location first.
-					locK := locKey{typeID, buyLocID}
+					locK := locKey{typeID, destLocID}
 					targetSellSupply = idx.sellSideSellDepthByLoc[locK]
 					targetLowestSell = idx.sellSideSellMinPriceByLoc[locK]
 					if targetSellSupply <= 0 {
@@ -844,48 +1129,61 @@ func (s *Scanner) calculateResults(
 				}
 
 				buyRegionID := int32(0)
-				if sys, ok := s.SDE.Systems[sell.SystemID]; ok {
+				if sys, ok := s.SDE.Systems[sourceSystemID]; ok {
 					buyRegionID = sys.RegionID
 				}
 				sellRegionID := int32(0)
-				if sys, ok := s.SDE.Systems[buy.SystemID]; ok {
+				if sys, ok := s.SDE.Systems[destinationSystemID]; ok {
 					sellRegionID = sys.RegionID
+				}
+
+				bestAskPrice := 0.0
+				bestAskQty := int32(0)
+				if !useSourceBuyOrders {
+					bestAskPrice = sourcePrice
+					bestAskQty = sourceBestLevelQty
+				}
+				bestBidPrice := 0.0
+				bestBidQty := int32(0)
+				if !useSellOrderRevenue {
+					bestBidPrice = destinationPrice
+					bestBidQty = destinationBestLevelQty
 				}
 
 				result := FlipResult{
 					TypeID:           typeID,
 					TypeName:         itemType.Name,
 					Volume:           itemType.Volume,
-					BuyPrice:         sell.Price,
-					BestAskPrice:     sell.Price,
-					BestAskQty:       sell.BestPriceVolume,
+					BuyPrice:         sourcePrice,
+					BestAskPrice:     bestAskPrice,
+					BestAskQty:       bestAskQty,
 					BuyStation:       "",
-					BuySystemName:    s.systemName(sell.SystemID),
-					BuySystemID:      sell.SystemID,
+					BuySystemName:    s.systemName(sourceSystemID),
+					BuySystemID:      sourceSystemID,
 					BuyRegionID:      buyRegionID,
 					BuyRegionName:    s.regionName(buyRegionID),
-					BuyLocationID:    sellLocID,
-					SellPrice:        buy.Price,
-					BestBidPrice:     buy.Price,
-					BestBidQty:       buy.BestPriceVolume,
+					BuyLocationID:    sourceLocID,
+					SellPrice:        destinationPrice,
+					BestBidPrice:     bestBidPrice,
+					BestBidQty:       bestBidQty,
 					SellStation:      "",
-					SellSystemName:   s.systemName(buy.SystemID),
-					SellSystemID:     buy.SystemID,
+					SellSystemName:   s.systemName(destinationSystemID),
+					SellSystemID:     destinationSystemID,
 					SellRegionID:     sellRegionID,
 					SellRegionName:   s.regionName(sellRegionID),
-					SellLocationID:   buyLocID,
+					SellLocationID:   destLocID,
 					ProfitPerUnit:    profitPerUnit,
 					MarginPercent:    margin,
 					UnitsToBuy:       units,
-					BuyOrderRemain:   buy.VolumeRemain,
-					SellOrderRemain:  sell.VolumeRemain,
+					BuyOrderRemain:   destinationVolume,
+					SellOrderRemain:  sourceVolume,
 					TotalProfit:      totalProfit,
 					ProfitPerJump:    sanitizeFloat(profitPerJump),
 					BuyJumps:         buyJumps,
 					SellJumps:        sellJumps,
 					TotalJumps:       totalJumps,
-					BuyCompetitors:   sell.OrderCount,
-					SellCompetitors:  buy.OrderCount,
+					BuyCompetitors:   sourceOrderCount,
+					SellCompetitors:  destinationOrderCount,
 					TargetSellSupply: targetSellSupply,
 					TargetLowestSell: targetLowestSell,
 				}
@@ -916,79 +1214,112 @@ func (s *Scanner) calculateResults(
 	// Filter orders by location_id for more accurate slippage estimates.
 	if len(results) > 0 {
 		progress("Expected fill prices...")
-		type locTypeKey struct {
-			locationID int64
-			typeID     int32
-		}
-		// Index sell orders by location+type (for buy-side execution plan at specific station)
-		sellByLT := make(map[locTypeKey][]esi.MarketOrder)
-		for _, o := range sellOrders {
-			k := locTypeKey{o.LocationID, o.TypeID}
-			sellByLT[k] = append(sellByLT[k], o)
-		}
-		// Index buy orders by location+type (for sell-side execution plan at specific station)
-		buyByLT := make(map[locTypeKey][]esi.MarketOrder)
-		for _, o := range buyOrders {
-			k := locTypeKey{o.LocationID, o.TypeID}
-			buyByLT[k] = append(buyByLT[k], o)
-		}
-		filtered := make([]FlipResult, 0, len(results))
-		for i := range results {
-			r := &results[i]
-			requestedQty := r.UnitsToBuy
-			safeQty, planBuy, planSell, expectedProfit := findSafeExecutionQuantity(
-				sellByLT[locTypeKey{r.BuyLocationID, r.TypeID}],
-				buyByLT[locTypeKey{r.SellLocationID, r.TypeID}],
-				requestedQty,
-				buyCostMult,
-				sellRevenueMult,
-			)
-			if safeQty <= 0 {
-				continue
+		if tradeMode == TradeModeInstantInstant {
+			type locTypeKey struct {
+				locationID int64
+				typeID     int32
 			}
-			effectiveBuyPerUnit := planBuy.ExpectedPrice * buyCostMult
-			if effectiveBuyPerUnit <= 0 {
-				continue
+			// Index sell orders by location+type (for buy-side execution plan at specific station)
+			sellByLT := make(map[locTypeKey][]esi.MarketOrder)
+			for _, o := range sellOrders {
+				k := locTypeKey{o.LocationID, o.TypeID}
+				sellByLT[k] = append(sellByLT[k], o)
 			}
-			execProfitPerUnit := expectedProfit / float64(safeQty)
-			if execProfitPerUnit <= 0 {
-				continue
+			// Index buy orders by location+type (for sell-side execution plan at specific station)
+			buyByLT := make(map[locTypeKey][]esi.MarketOrder)
+			for _, o := range buyOrders {
+				k := locTypeKey{o.LocationID, o.TypeID}
+				buyByLT[k] = append(buyByLT[k], o)
 			}
-			realMarginPct := sanitizeFloat(execProfitPerUnit / effectiveBuyPerUnit * 100)
-			// Enforce user margin threshold on execution-aware economics, not top-book fantasy.
-			if realMarginPct < params.MinMargin {
-				continue
-			}
-			// Slippage can move actual required buy-side capital above pre-filter estimate.
-			if params.MaxInvestment > 0 {
-				execBuyCost := planBuy.TotalCost * buyCostMult
-				if execBuyCost > params.MaxInvestment {
+			filtered := make([]FlipResult, 0, len(results))
+			for i := range results {
+				r := &results[i]
+				requestedQty := r.UnitsToBuy
+				safeQty, planBuy, planSell, expectedProfit := findSafeExecutionQuantity(
+					sellByLT[locTypeKey{r.BuyLocationID, r.TypeID}],
+					buyByLT[locTypeKey{r.SellLocationID, r.TypeID}],
+					requestedQty,
+					buyCostMult,
+					sellRevenueMult,
+				)
+				if safeQty <= 0 {
 					continue
 				}
-			}
-
-			r.FilledQty = safeQty
-			r.CanFill = safeQty >= requestedQty
-			r.RealMarginPercent = realMarginPct
-
-			if safeQty != requestedQty {
-				r.UnitsToBuy = safeQty
-				r.TotalProfit = r.ProfitPerUnit * float64(safeQty)
-				if r.TotalJumps > 0 {
-					r.ProfitPerJump = sanitizeFloat(r.TotalProfit / float64(r.TotalJumps))
-				} else {
-					r.ProfitPerJump = 0
+				effectiveBuyPerUnit := planBuy.ExpectedPrice * buyCostMult
+				if effectiveBuyPerUnit <= 0 {
+					continue
 				}
+				execProfitPerUnit := expectedProfit / float64(safeQty)
+				if execProfitPerUnit <= 0 {
+					continue
+				}
+				realMarginPct := sanitizeFloat(execProfitPerUnit / effectiveBuyPerUnit * 100)
+				// Enforce user margin threshold on execution-aware economics, not top-book fantasy.
+				if realMarginPct < params.MinMargin {
+					continue
+				}
+				// Slippage can move actual required buy-side capital above pre-filter estimate.
+				if params.MaxInvestment > 0 {
+					execBuyCost := planBuy.TotalCost * buyCostMult
+					if execBuyCost > params.MaxInvestment {
+						continue
+					}
+				}
+
+				r.FilledQty = safeQty
+				r.CanFill = safeQty >= requestedQty
+				r.RealMarginPercent = realMarginPct
+
+				if safeQty != requestedQty {
+					r.UnitsToBuy = safeQty
+					r.TotalProfit = r.ProfitPerUnit * float64(safeQty)
+					if r.TotalJumps > 0 {
+						r.ProfitPerJump = sanitizeFloat(r.TotalProfit / float64(r.TotalJumps))
+					} else {
+						r.ProfitPerJump = 0
+					}
+				}
+				r.ExpectedBuyPrice = planBuy.ExpectedPrice
+				r.ExpectedSellPrice = planSell.ExpectedPrice
+				r.SlippageBuyPct = planBuy.SlippagePercent
+				r.SlippageSellPct = planSell.SlippagePercent
+				r.ExpectedProfit = expectedProfit
+				r.RealProfit = expectedProfit
+				filtered = append(filtered, *r)
 			}
-			r.ExpectedBuyPrice = planBuy.ExpectedPrice
-			r.ExpectedSellPrice = planSell.ExpectedPrice
-			r.SlippageBuyPct = planBuy.SlippagePercent
-			r.SlippageSellPct = planSell.SlippagePercent
-			r.ExpectedProfit = expectedProfit
-			r.RealProfit = expectedProfit
-			filtered = append(filtered, *r)
+			results = filtered
+		} else {
+			filtered := make([]FlipResult, 0, len(results))
+			for i := range results {
+				r := &results[i]
+				if r.UnitsToBuy <= 0 {
+					continue
+				}
+				effectiveBuyPerUnit := r.BuyPrice * buyCostMult
+				if effectiveBuyPerUnit <= 0 {
+					continue
+				}
+				expectedProfit := r.ProfitPerUnit * float64(r.UnitsToBuy)
+				if expectedProfit <= 0 {
+					continue
+				}
+				realMarginPct := sanitizeFloat(r.ProfitPerUnit / effectiveBuyPerUnit * 100)
+				if realMarginPct < params.MinMargin {
+					continue
+				}
+				r.FilledQty = r.UnitsToBuy
+				r.CanFill = true
+				r.RealMarginPercent = realMarginPct
+				r.ExpectedBuyPrice = r.BuyPrice
+				r.ExpectedSellPrice = r.SellPrice
+				r.SlippageBuyPct = 0
+				r.SlippageSellPct = 0
+				r.ExpectedProfit = expectedProfit
+				r.RealProfit = expectedProfit
+				filtered = append(filtered, *r)
+			}
+			results = filtered
 		}
-		results = filtered
 
 		// Re-sort by real profit (depth/slippage-aware KPI).
 		sort.Slice(results, func(i, j int) bool {

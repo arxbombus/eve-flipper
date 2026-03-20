@@ -510,6 +510,206 @@ func TestCalculateResults_CargoCapacityClampsQuantityWithoutDroppingRow(t *testi
 	}
 }
 
+func TestCalculateResults_SellOrderModeFindsRowsWithoutDestinationBuys(t *testing.T) {
+	u := graph.NewUniverse()
+	u.SetRegion(1, 10000002)
+	u.SetRegion(2, 10000002)
+	u.SetSecurity(1, 0.9)
+	u.SetSecurity(2, 0.9)
+	u.AddGate(1, 2)
+	u.AddGate(2, 1)
+
+	const (
+		typeID      = int32(4242)
+		sourceLocID = int64(400000000001)
+		targetLocID = int64(400000000002)
+		currentSys  = int32(1)
+		sourceSysID = int32(1)
+		targetSysID = int32(2)
+	)
+
+	scanner := &Scanner{
+		SDE: &sde.Data{
+			Universe: u,
+			Systems: map[int32]*sde.SolarSystem{
+				1: {ID: 1, Name: "Source", RegionID: 10000002},
+				2: {ID: 2, Name: "Target", RegionID: 10000002},
+			},
+			Types: map[int32]*sde.ItemType{
+				typeID: {ID: typeID, Name: "SellOrder Item", Volume: 1},
+			},
+		},
+		ESI: esi.NewClient(nil),
+	}
+
+	idx := &scanIndex{
+		sellByType: map[int32][]sellInfo{
+			typeID: {
+				{Price: 100, VolumeRemain: 40, LocationID: sourceLocID, SystemID: sourceSysID, OrderCount: 1},
+			},
+		},
+		sellSideSellByType: map[int32][]sellInfo{
+			typeID: {
+				{Price: 130, VolumeRemain: 60, LocationID: targetLocID, SystemID: targetSysID, OrderCount: 2},
+			},
+		},
+		sellSideSellDepthByType: map[int32]int64{
+			typeID: 60,
+		},
+		sellSideSellDepthByLoc: map[locKey]int64{
+			{typeID: typeID, locationID: targetLocID}: 60,
+		},
+		sellSideSellDepthByTypeSystem: map[sysTypeKey]int64{
+			{typeID: typeID, systemID: targetSysID}: 60,
+		},
+		sellSideSellMinPriceByLoc: map[locKey]float64{
+			{typeID: typeID, locationID: targetLocID}: 130,
+		},
+		sellSideSellMinPriceByTypeSystem: map[sysTypeKey]float64{
+			{typeID: typeID, systemID: targetSysID}: 130,
+		},
+		sellSideBuyDepthByType: map[int32]int64{
+			typeID: 0,
+		},
+	}
+
+	bfs := map[int32]int{currentSys: 0}
+
+	instantResults, err := scanner.calculateResults(
+		ScanParams{
+			CurrentSystemID: currentSys,
+			CargoCapacity:   1000,
+			MinMargin:       0.1,
+			TradeMode:       TradeModeInstantInstant,
+		},
+		idx,
+		bfs,
+		func(string) {},
+	)
+	if err != nil {
+		t.Fatalf("calculateResults instant mode: %v", err)
+	}
+	if len(instantResults) != 0 {
+		t.Fatalf("instant mode should require destination buy depth, got %d rows", len(instantResults))
+	}
+
+	sellOrderResults, err := scanner.calculateResults(
+		ScanParams{
+			CurrentSystemID: currentSys,
+			CargoCapacity:   1000,
+			MinMargin:       0.1,
+			TradeMode:       TradeModeInstantSell,
+		},
+		idx,
+		bfs,
+		func(string) {},
+	)
+	if err != nil {
+		t.Fatalf("calculateResults sell-order mode: %v", err)
+	}
+	if len(sellOrderResults) != 1 {
+		t.Fatalf("sell-order mode rows = %d, want 1", len(sellOrderResults))
+	}
+	got := sellOrderResults[0]
+	if got.BuyPrice != 100 || got.SellPrice != 130 {
+		t.Fatalf("unexpected prices buy=%v sell=%v", got.BuyPrice, got.SellPrice)
+	}
+	if got.TargetLowestSell != 130 {
+		t.Fatalf("target_lowest_sell=%v, want 130", got.TargetLowestSell)
+	}
+}
+
+func TestCalculateResults_BuyOrderToSellOrderModeUsesSourceBids(t *testing.T) {
+	u := graph.NewUniverse()
+	u.SetRegion(1, 10000002)
+	u.SetRegion(2, 10000002)
+	u.SetSecurity(1, 0.9)
+	u.SetSecurity(2, 0.9)
+	u.AddGate(1, 2)
+	u.AddGate(2, 1)
+
+	const (
+		typeID      = int32(5151)
+		sourceLocID = int64(500000000001)
+		targetLocID = int64(500000000002)
+		currentSys  = int32(1)
+		sourceSysID = int32(1)
+		targetSysID = int32(2)
+	)
+
+	scanner := &Scanner{
+		SDE: &sde.Data{
+			Universe: u,
+			Systems: map[int32]*sde.SolarSystem{
+				1: {ID: 1, Name: "Source", RegionID: 10000002},
+				2: {ID: 2, Name: "Target", RegionID: 10000002},
+			},
+			Types: map[int32]*sde.ItemType{
+				typeID: {ID: typeID, Name: "BidSource Item", Volume: 1},
+			},
+		},
+		ESI: esi.NewClient(nil),
+	}
+
+	idx := &scanIndex{
+		sourceBuyByType: map[int32][]buyInfo{
+			typeID: {
+				{Price: 95, VolumeRemain: 25, LocationID: sourceLocID, SystemID: sourceSysID, OrderCount: 3},
+			},
+		},
+		sellSideSellByType: map[int32][]sellInfo{
+			typeID: {
+				{Price: 120, VolumeRemain: 80, LocationID: targetLocID, SystemID: targetSysID, OrderCount: 4},
+			},
+		},
+		sellSideSellDepthByType: map[int32]int64{
+			typeID: 80,
+		},
+		sellSideSellDepthByLoc: map[locKey]int64{
+			{typeID: typeID, locationID: targetLocID}: 80,
+		},
+		sellSideSellDepthByTypeSystem: map[sysTypeKey]int64{
+			{typeID: typeID, systemID: targetSysID}: 80,
+		},
+		sellSideSellMinPriceByLoc: map[locKey]float64{
+			{typeID: typeID, locationID: targetLocID}: 120,
+		},
+		sellSideSellMinPriceByTypeSystem: map[sysTypeKey]float64{
+			{typeID: typeID, systemID: targetSysID}: 120,
+		},
+		sellSideBuyDepthByType: map[int32]int64{
+			typeID: 0,
+		},
+	}
+
+	bfs := map[int32]int{currentSys: 0}
+
+	results, err := scanner.calculateResults(
+		ScanParams{
+			CurrentSystemID: currentSys,
+			CargoCapacity:   1000,
+			MinMargin:       0.1,
+			TradeMode:       TradeModeBuyOrderToSell,
+		},
+		idx,
+		bfs,
+		func(string) {},
+	)
+	if err != nil {
+		t.Fatalf("calculateResults buy-order->sell-order mode: %v", err)
+	}
+	if len(results) != 1 {
+		t.Fatalf("rows = %d, want 1", len(results))
+	}
+	got := results[0]
+	if got.BuyPrice != 95 || got.SellPrice != 120 {
+		t.Fatalf("unexpected prices buy=%v sell=%v", got.BuyPrice, got.SellPrice)
+	}
+	if got.BestAskPrice != 0 {
+		t.Fatalf("buy-order source should not expose ask L1, got %v", got.BestAskPrice)
+	}
+}
+
 func TestHarmonicDailyShare_MonotoneAndBounded(t *testing.T) {
 	const daily = int64(10_000)
 	if got := harmonicDailyShare(0, 5); got != 0 {

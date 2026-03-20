@@ -1560,6 +1560,9 @@ func (s *Server) handleSetConfig(w http.ResponseWriter, r *http.Request) {
 	if v, ok := patch["min_item_profit"]; ok {
 		json.Unmarshal(v, &cfg.MinItemProfit)
 	}
+	if v, ok := patch["min_item_profit_mode"]; ok {
+		json.Unmarshal(v, &cfg.MinItemProfitMode)
+	}
 	if v, ok := patch["min_s2b_per_day"]; ok {
 		json.Unmarshal(v, &cfg.MinS2BPerDay)
 	}
@@ -1608,8 +1611,14 @@ func (s *Server) handleSetConfig(w http.ResponseWriter, r *http.Request) {
 	if v, ok := patch["category_ids"]; ok {
 		json.Unmarshal(v, &cfg.CategoryIDs)
 	}
+	if v, ok := patch["exclude_keywords"]; ok {
+		json.Unmarshal(v, &cfg.ExcludeKeywords)
+	}
 	if v, ok := patch["sell_order_mode"]; ok {
 		json.Unmarshal(v, &cfg.SellOrderMode)
+	}
+	if v, ok := patch["trade_mode"]; ok {
+		json.Unmarshal(v, &cfg.TradeMode)
 	}
 	if v, ok := patch["alert_telegram"]; ok {
 		json.Unmarshal(v, &cfg.AlertTelegram)
@@ -1698,6 +1707,7 @@ func (s *Server) handleSetConfig(w http.ResponseWriter, r *http.Request) {
 	if cfg.MinItemProfit < 0 {
 		cfg.MinItemProfit = 0
 	}
+	cfg.MinItemProfitMode = engine.NormalizeMinItemProfitMode(cfg.MinItemProfitMode)
 	if cfg.MinS2BPerDay < 0 {
 		cfg.MinS2BPerDay = 0
 	}
@@ -1775,6 +1785,28 @@ func (s *Server) handleSetConfig(w http.ResponseWriter, r *http.Request) {
 		}
 		cfg.CategoryIDs = clean
 	}
+	{
+		clean := make([]string, 0, len(cfg.ExcludeKeywords))
+		seen := make(map[string]bool, len(cfg.ExcludeKeywords))
+		for _, keyword := range cfg.ExcludeKeywords {
+			trimmed := strings.TrimSpace(keyword)
+			if trimmed == "" {
+				continue
+			}
+			key := strings.ToLower(trimmed)
+			if seen[key] {
+				continue
+			}
+			seen[key] = true
+			clean = append(clean, trimmed)
+			if len(clean) >= 64 {
+				break
+			}
+		}
+		cfg.ExcludeKeywords = clean
+	}
+	cfg.TradeMode = engine.NormalizeTradeMode(cfg.TradeMode)
+	cfg.SellOrderMode = cfg.TradeMode != engine.TradeModeInstantInstant
 	if cfg.Opacity < 0 {
 		cfg.Opacity = 0
 	} else if cfg.Opacity > 100 {
@@ -2090,6 +2122,7 @@ type scanRequest struct {
 	MinDailyVolume         int64    `json:"min_daily_volume"`
 	MaxInvestment          float64  `json:"max_investment"`
 	MinItemProfit          float64  `json:"min_item_profit"`
+	MinItemProfitMode      string   `json:"min_item_profit_mode"`
 	MinPeriodROI           float64  `json:"min_period_roi"`
 	MaxDOS                 float64  `json:"max_dos"`
 	MinDemandPerDay        float64  `json:"min_demand_per_day"`
@@ -2116,8 +2149,12 @@ type scanRequest struct {
 	ExcludeRigsWithShip        bool    `json:"exclude_rigs_with_ship"`
 	// Category filter for regional day trader (empty = all categories)
 	CategoryIDs []int32 `json:"category_ids"`
+	// Exclude item names containing these keywords (case-insensitive)
+	ExcludeKeywords []string `json:"exclude_keywords"`
 	// Sell-order mode: use target lowest sell price instead of highest buy order price
 	SellOrderMode bool `json:"sell_order_mode"`
+	// Explicit regional trade mode (preferred over sell_order_mode when provided).
+	TradeMode string `json:"trade_mode"`
 	// Player structures
 	IncludeStructures bool `json:"include_structures"`
 }
@@ -2197,6 +2234,7 @@ func (s *Server) parseScanParams(req scanRequest) (engine.ScanParams, error) {
 		MinDailyVolume:             req.MinDailyVolume,
 		MaxInvestment:              req.MaxInvestment,
 		MinItemProfit:              req.MinItemProfit,
+		MinItemProfitMode:          engine.NormalizeMinItemProfitMode(req.MinItemProfitMode),
 		MinPeriodROI:               req.MinPeriodROI,
 		MaxDOS:                     req.MaxDOS,
 		MinDemandPerDay:            req.MinDemandPerDay,
@@ -2221,7 +2259,9 @@ func (s *Server) parseScanParams(req scanRequest) (engine.ScanParams, error) {
 		ContractTargetConfidence:   req.ContractTargetConfidence,
 		ExcludeRigsWithShip:        req.ExcludeRigsWithShip,
 		CategoryIDs:                req.CategoryIDs,
+		ExcludeKeywords:            req.ExcludeKeywords,
 		SellOrderMode:              req.SellOrderMode,
+		TradeMode:                  engine.NormalizeTradeMode(req.TradeMode),
 		IncludeStructures:          req.IncludeStructures,
 	}, nil
 }
@@ -2603,12 +2643,15 @@ func (s *Server) handleScanRegionalDay(w http.ResponseWriter, r *http.Request) {
 	scanner := s.scanner
 	s.mu.RUnlock()
 
-	log.Printf("[API] ScanRegionalDay starting: system=%d, cargo=%.0f, buyR=%d, targetRegion=%d, period=%d, include_structures=%t, has_token=%t",
+	log.Printf("[API] ScanRegionalDay starting: system=%d, cargo=%.0f, buyR=%d, targetRegion=%d, period=%d, trade_mode=%s, targetMarketSystem=%d, targetMarketLocation=%d, include_structures=%t, has_token=%t",
 		params.CurrentSystemID,
 		params.CargoCapacity,
 		params.BuyRadius,
 		params.TargetRegionID,
 		params.AvgPricePeriod,
+		params.EffectiveTradeMode(),
+		params.TargetMarketSystemID,
+		params.TargetMarketLocationID,
 		req.IncludeStructures,
 		strings.TrimSpace(params.AccessToken) != "",
 	)
@@ -3896,6 +3939,7 @@ func (s *Server) regionalDayParamsFromHistory(record *db.ScanRecord) (engine.Sca
 		MinDailyVolume:         req.MinDailyVolume,
 		MaxInvestment:          req.MaxInvestment,
 		MinItemProfit:          req.MinItemProfit,
+		MinItemProfitMode:      engine.NormalizeMinItemProfitMode(req.MinItemProfitMode),
 		MinPeriodROI:           req.MinPeriodROI,
 		MaxDOS:                 req.MaxDOS,
 		MinDemandPerDay:        req.MinDemandPerDay,
@@ -3909,7 +3953,9 @@ func (s *Server) regionalDayParamsFromHistory(record *db.ScanRecord) (engine.Sca
 		MinRouteSecurity:       req.MinRouteSecurity,
 		TargetMarketLocationID: req.TargetMarketLocationID,
 		CategoryIDs:            req.CategoryIDs,
+		ExcludeKeywords:        req.ExcludeKeywords,
 		SellOrderMode:          req.SellOrderMode,
+		TradeMode:              engine.NormalizeTradeMode(req.TradeMode),
 	}
 
 	s.mu.RLock()

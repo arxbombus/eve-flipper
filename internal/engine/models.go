@@ -188,12 +188,16 @@ type ScanParams struct {
 	BuySalesTaxPercent   float64
 	SellSalesTaxPercent  float64
 	// Advanced filters
-	MinDailyVolume  int64   // 0 = no filter
-	MaxInvestment   float64 // 0 = no filter (max ISK per position)
-	MinItemProfit   float64 // 0 = no filter (min ISK profit per position for regional day trader)
-	MinPeriodROI    float64 // 0 = no filter (min period ROI % for regional day trader)
-	MaxDOS          float64 // 0 = no filter (max days-of-supply at target for regional day trader)
-	MinDemandPerDay float64 // 0 = no filter (min demand units/day at target for regional day trader)
+	MinDailyVolume int64   // 0 = no filter
+	MaxInvestment  float64 // 0 = no filter (max ISK per position)
+	MinItemProfit  float64 // 0 = no filter
+	// MinItemProfitMode controls how MinItemProfit is interpreted in regional day trader:
+	// - "unit": minimum ISK per unit (default)
+	// - "order": minimum ISK per order/position
+	MinItemProfitMode string
+	MinPeriodROI      float64 // 0 = no filter (min period ROI % for regional day trader)
+	MaxDOS            float64 // 0 = no filter (max days-of-supply at target for regional day trader)
+	MinDemandPerDay   float64 // 0 = no filter (min demand units/day at target for regional day trader)
 	// PurchaseDemandDays controls target purchase volume as N days of target demand.
 	// Example: 0.5 means "buy half of one demand-day". <=0 uses mode-specific defaults.
 	PurchaseDemandDays float64
@@ -202,8 +206,8 @@ type ScanParams struct {
 	MinS2BBfSRatio     float64 // 0 = no filter
 	MaxS2BBfSRatio     float64 // 0 = no filter
 	AvgPricePeriod     int     // 0 = default period (14 days for regional day trader)
-	// Heuristic hauling cost model: ISK per (m3 * jump) used by regional day trader scoring.
-	ShippingCostPerM3Jump float64 // 0 = disabled
+	// Heuristic hauling cost model: ISK per m3 used by regional day trader scoring.
+	ShippingCostPerM3Jump float64 // 0 = disabled (kept for API/config compatibility)
 	// Optional source-side region constraints for regional day trader.
 	// Empty = use legacy buy-radius scope from CurrentSystemID.
 	SourceRegionIDs []int32
@@ -216,12 +220,22 @@ type ScanParams struct {
 
 	// --- Category/group filter for regional day trader ---
 	CategoryIDs []int32 // empty = all categories; non-empty = only include these EVE category IDs
+	// ExcludeKeywords filters out rows whose type name contains any keyword (case-insensitive).
+	ExcludeKeywords []string
 
 	// --- Sell-order mode for regional day trader ---
 	// When true, targetNowPrice uses TargetLowestSell (lowest ask at destination)
 	// instead of TargetBuyOrderPrice (highest bid). Reflects listing a sell order
 	// rather than instantly hitting a buy order. Higher profit, higher risk.
 	SellOrderMode bool
+	// TradeMode selects source acquisition and destination liquidation model
+	// for regional trading scans.
+	// Supported values:
+	// - "instant_instant": buy instantly from asks, sell instantly to bids (legacy default)
+	// - "instant_sell_order": buy instantly from asks, list sell order at destination asks
+	// - "buy_order_sell_order": place buy order at source bids, list sell order at destination asks
+	// Empty/unknown values are normalized via SellOrderMode for backward compatibility.
+	TradeMode string
 	// IncludeStructures keeps Upwell structure orders in scope.
 	IncludeStructures bool
 	// AccessToken is used for authenticated structure-market reads.
@@ -237,4 +251,50 @@ type ScanParams struct {
 	ContractHoldDays           int     // Non-instant mode: hold horizon in days (0 = default)
 	ContractTargetConfidence   float64 // Non-instant mode: minimum full-liquidation probability in % (0 = default)
 	ExcludeRigsWithShip        bool    // If true, exclude rig pricing when contract contains a ship
+}
+
+const (
+	TradeModeInstantInstant = "instant_instant"
+	TradeModeInstantSell    = "instant_sell_order"
+	TradeModeBuyOrderToSell = "buy_order_sell_order"
+	MinItemProfitModeUnit   = "unit"
+	MinItemProfitModeOrder  = "order"
+)
+
+// NormalizeTradeMode returns a supported trade mode value.
+// Backward compatibility: when mode is empty/invalid, SellOrderMode=true
+// maps to instant->sell-order, otherwise instant->instant.
+func NormalizeTradeMode(mode string) string {
+	switch mode {
+	case TradeModeInstantInstant, TradeModeInstantSell, TradeModeBuyOrderToSell:
+		return mode
+	default:
+		return TradeModeInstantInstant
+	}
+}
+
+func (p ScanParams) EffectiveTradeMode() string {
+	return NormalizeTradeMode(p.TradeMode)
+}
+
+func (p ScanParams) UsesSellOrderRevenue() bool {
+	switch p.EffectiveTradeMode() {
+	case TradeModeInstantSell, TradeModeBuyOrderToSell:
+		return true
+	default:
+		return false
+	}
+}
+
+func (p ScanParams) UsesSourceBuyOrders() bool {
+	return p.EffectiveTradeMode() == TradeModeBuyOrderToSell
+}
+
+func NormalizeMinItemProfitMode(mode string) string {
+	switch mode {
+	case MinItemProfitModeOrder:
+		return MinItemProfitModeOrder
+	default:
+		return MinItemProfitModeUnit
+	}
 }

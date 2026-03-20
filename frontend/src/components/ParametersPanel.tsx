@@ -538,9 +538,19 @@ export function ParametersPanel({
                 <div className="text-[9px] uppercase tracking-widest text-eve-accent/70 font-bold mb-2 flex items-center gap-1.5">
                   <span className="text-eve-accent">◈</span> Filters
                 </div>
-                <div className="grid grid-cols-3 lg:grid-cols-7 gap-2">
+                <div className="grid grid-cols-3 lg:grid-cols-8 gap-2">
                   <Field label={t("minItemProfit")}>
                     <NumberInput value={params.min_item_profit ?? 0} onChange={(v) => set("min_item_profit", v)} min={0} max={999999999999} />
+                  </Field>
+                  <Field label="Min Profit Mode">
+                    <select
+                      value={params.min_item_profit_mode ?? "unit"}
+                      onChange={(e) => set("min_item_profit_mode", (e.target.value as "unit" | "order"))}
+                      className={inputClass}
+                    >
+                      <option value="unit">Per Unit (ISK/unit)</option>
+                      <option value="order">Per Order (ISK/order)</option>
+                    </select>
                   </Field>
                   <Field label={t("minPeriodROI")} hint={t("minPeriodROIHint")}>
                     <NumberInput value={params.min_period_roi ?? 0} onChange={(v) => set("min_period_roi", v)} min={0} max={10000} step={0.1} />
@@ -560,40 +570,100 @@ export function ParametersPanel({
                   <Field label={t("minOrderMargin")}>
                     <NumberInput value={params.min_margin} onChange={(v) => set("min_margin", v)} min={0.1} max={1000} step={0.1} />
                   </Field>
+                  <Field label="Shipping ISK/m³">
+                    <NumberInput value={params.shipping_cost_per_m3_jump ?? 0} onChange={(v) => set("shipping_cost_per_m3_jump", v)} min={0} max={1000000} step={0.1} />
+                  </Field>
+                </div>
+                <div className="mt-2 grid grid-cols-1 lg:grid-cols-2 gap-2">
+                  <Field label="Exclude Keywords" hint="Comma-separated, case-insensitive (e.g. firework,event)">
+                    <input
+                      className={inputClass}
+                      value={(params.exclude_keywords ?? []).join(", ")}
+                      onChange={(e) =>
+                        set(
+                          "exclude_keywords",
+                          e.target.value
+                            .split(",")
+                            .map((k) => k.trim())
+                            .filter((k) => k.length > 0),
+                        )
+                      }
+                      placeholder="firework, civilian"
+                    />
+                  </Field>
                 </div>
                 {/* ── Revenue mode toggle ── */}
                 <div className="mt-2.5 pt-2 border-t border-eve-border/40 flex items-center gap-2">
                   <span className="text-[9px] uppercase tracking-widest text-eve-dim font-bold shrink-0">
-                    Revenue Mode
+                    Trade Mode
                   </span>
                   <div className="flex items-center rounded-sm border border-eve-border overflow-hidden text-[11px] font-medium">
                     <button
                       type="button"
-                      onClick={() => set("sell_order_mode", false)}
+                      aria-pressed={(params.trade_mode ?? "instant_instant") === "instant_instant"}
+                      onClick={() =>
+                        onChange({
+                          ...params,
+                          trade_mode: "instant_instant",
+                          sell_order_mode: false,
+                        })
+                      }
                       className={`px-3 py-1 transition-colors ${
-                        !params.sell_order_mode
-                          ? "bg-eve-accent/20 text-eve-accent border-r border-eve-border"
-                          : "text-eve-dim hover:text-eve-light border-r border-eve-border"
+                        (params.trade_mode ?? "instant_instant") === "instant_instant"
+                          ? "bg-eve-accent/30 text-eve-accent font-semibold border-r border-eve-border shadow-[inset_0_0_0_1px_rgba(74,201,255,0.35)]"
+                          : "text-eve-dim hover:text-eve-light border-r border-eve-border hover:bg-eve-panel/60"
                       }`}
                     >
-                      ⚡ Instant
+                      ⚡ Instant to Instant
                     </button>
                     <button
                       type="button"
-                      title={t("sellOrderModeHint")}
-                      onClick={() => set("sell_order_mode", true)}
+                      aria-pressed={(params.trade_mode ?? "instant_instant") === "instant_sell_order"}
+                      onClick={() =>
+                        onChange({
+                          ...params,
+                          trade_mode: "instant_sell_order",
+                          sell_order_mode: true,
+                        })
+                      }
                       className={`px-3 py-1 transition-colors ${
-                        params.sell_order_mode
-                          ? "bg-amber-400/15 text-amber-300"
-                          : "text-eve-dim hover:text-eve-light"
+                        (params.trade_mode ?? "instant_instant") === "instant_sell_order"
+                          ? "bg-amber-400/25 text-amber-200 font-semibold border-r border-eve-border shadow-[inset_0_0_0_1px_rgba(251,191,36,0.4)]"
+                          : "text-eve-dim hover:text-eve-light border-r border-eve-border hover:bg-eve-panel/60"
                       }`}
                     >
-                      📋 Sell Order
+                      📋 Instant to Sell Order
+                    </button>
+                    <button
+                      type="button"
+                      aria-pressed={(params.trade_mode ?? "instant_instant") === "buy_order_sell_order"}
+                      onClick={() =>
+                        onChange({
+                          ...params,
+                          trade_mode: "buy_order_sell_order",
+                          sell_order_mode: true,
+                        })
+                      }
+                      className={`px-3 py-1 transition-colors ${
+                        (params.trade_mode ?? "instant_instant") === "buy_order_sell_order"
+                          ? "bg-teal-400/25 text-teal-200 font-semibold shadow-[inset_0_0_0_1px_rgba(45,212,191,0.4)]"
+                          : "text-eve-dim hover:text-eve-light hover:bg-eve-panel/60"
+                      }`}
+                    >
+                      🧾 Buy Order to Sell Order
                     </button>
                   </div>
-                  {params.sell_order_mode && (
+                  <span className="text-[10px] text-eve-dim font-mono">
+                    Current:{" "}
+                    {(params.trade_mode ?? "instant_instant") === "instant_instant"
+                      ? "Instant->Instant"
+                      : (params.trade_mode ?? "instant_instant") === "instant_sell_order"
+                        ? "Instant->Sell"
+                        : "BuyOrder->Sell"}
+                  </span>
+                  {(params.trade_mode ?? "instant_instant") !== "instant_instant" && (
                     <span className="text-[10px] text-amber-300/70 italic">
-                      Revenue = lowest ask at destination
+                      Revenue = destination ask-side sell order
                     </span>
                   )}
                 </div>
@@ -700,9 +770,6 @@ export function ParametersPanel({
                       </Field>
                       <Field label={t("maxInvestment")}>
                         <NumberInput value={params.max_investment ?? 0} onChange={(v) => set("max_investment", v)} min={0} max={999999999999} />
-                      </Field>
-                      <Field label="Shipping ISK/(m³·j)">
-                        <NumberInput value={params.shipping_cost_per_m3_jump ?? 0} onChange={(v) => set("shipping_cost_per_m3_jump", v)} min={0} max={1000000} step={0.1} />
                       </Field>
                     </div>
                     <div className="grid grid-cols-2 lg:grid-cols-4 gap-2">

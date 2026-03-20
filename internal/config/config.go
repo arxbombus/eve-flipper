@@ -29,14 +29,15 @@ type Config struct {
 	SellSalesTaxPercent  float64 `json:"sell_sales_tax_percent"`
 
 	// Shared advanced scan filters.
-	MinDailyVolume   int64   `json:"min_daily_volume"`
-	MaxInvestment    float64 `json:"max_investment"`
-	MinItemProfit    float64 `json:"min_item_profit"`
-	MinS2BPerDay     float64 `json:"min_s2b_per_day"`
-	MinBfSPerDay     float64 `json:"min_bfs_per_day"`
-	MinS2BBfSRatio   float64 `json:"min_s2b_bfs_ratio"`
-	MaxS2BBfSRatio   float64 `json:"max_s2b_bfs_ratio"`
-	MinRouteSecurity float64 `json:"min_route_security"`
+	MinDailyVolume    int64   `json:"min_daily_volume"`
+	MaxInvestment     float64 `json:"max_investment"`
+	MinItemProfit     float64 `json:"min_item_profit"`
+	MinItemProfitMode string  `json:"min_item_profit_mode"`
+	MinS2BPerDay      float64 `json:"min_s2b_per_day"`
+	MinBfSPerDay      float64 `json:"min_bfs_per_day"`
+	MinS2BBfSRatio    float64 `json:"min_s2b_bfs_ratio"`
+	MaxS2BBfSRatio    float64 `json:"max_s2b_bfs_ratio"`
+	MinRouteSecurity  float64 `json:"min_route_security"`
 
 	// Regional day-trader parameters.
 	AvgPricePeriod         int      `json:"avg_price_period"`
@@ -50,7 +51,9 @@ type Config struct {
 	TargetMarketSystem     string   `json:"target_market_system"`
 	TargetMarketLocationID int64    `json:"target_market_location_id"`
 	CategoryIDs            []int32  `json:"category_ids"`
+	ExcludeKeywords        []string `json:"exclude_keywords"`
 	SellOrderMode          bool     `json:"sell_order_mode"`
+	TradeMode              string   `json:"trade_mode"`
 
 	AlertTelegram       bool   `json:"alert_telegram"`
 	AlertDiscord        bool   `json:"alert_discord"`
@@ -80,6 +83,7 @@ func Default() *Config {
 		BuySalesTaxPercent:   0,
 		SellSalesTaxPercent:  8,
 		MinRouteSecurity:     0.45,
+		MinItemProfitMode:    "unit",
 		AvgPricePeriod:       14,
 		PurchaseDemandDays:   0.5,
 		SourceRegions: []string{
@@ -90,6 +94,7 @@ func Default() *Config {
 			"Heimatar",
 		},
 		TargetMarketSystem: "Jita",
+		TradeMode:          "instant_instant",
 		AlertDesktop:       true,
 		Opacity:            230,
 		WindowW:            800,

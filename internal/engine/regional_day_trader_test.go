@@ -190,7 +190,7 @@ func TestBuildRegionalDayTrader_PurchaseUnitsBehaviorByRevenueMode(t *testing.T)
 			ScanParams{
 				AvgPricePeriod:     14,
 				PurchaseDemandDays: 0.5,
-				SellOrderMode:      true,
+				TradeMode:          TradeModeInstantSell,
 			},
 			flips,
 			nil,
@@ -206,12 +206,32 @@ func TestBuildRegionalDayTrader_PurchaseUnitsBehaviorByRevenueMode(t *testing.T)
 		}
 	})
 
+	t.Run("buy_order_sell_order_mode_uses_sell_order_revenue_path", func(t *testing.T) {
+		hubs, totalItems, _, _ := scanner.BuildRegionalDayTrader(
+			ScanParams{
+				AvgPricePeriod:     14,
+				PurchaseDemandDays: 0.5,
+				TradeMode:          TradeModeBuyOrderToSell,
+				SellOrderMode:      false, // legacy toggle off; TradeMode must still activate sell-order path
+			},
+			flips,
+			nil,
+			nil,
+		)
+		if len(hubs) != 1 || totalItems != 1 {
+			t.Fatalf("unexpected shape: hubs=%d items=%d", len(hubs), totalItems)
+		}
+		if got := hubs[0].Items[0].PurchaseUnits; got != 38 {
+			t.Fatalf("purchase_units = %d, want 38 in buy-order->sell-order mode", got)
+		}
+	})
+
 	t.Run("sell_order_mode_respects_cargo_capacity", func(t *testing.T) {
 		hubs, totalItems, _, _ := scanner.BuildRegionalDayTrader(
 			ScanParams{
 				AvgPricePeriod:     14,
 				PurchaseDemandDays: 0.5,
-				SellOrderMode:      true,
+				TradeMode:          TradeModeInstantSell,
 				CargoCapacity:      50_000, // volume=5000 => max 10 units
 			},
 			flips,
@@ -277,6 +297,122 @@ func TestBuildRegionalDayTrader_MinItemProfitFiltersRows(t *testing.T) {
 	}
 	if totalItems != 0 {
 		t.Fatalf("totalItems = %d, want 0", totalItems)
+	}
+}
+
+func TestBuildRegionalDayTrader_MinItemProfitMode(t *testing.T) {
+	scanner := &Scanner{
+		SDE: &sde.Data{
+			Systems: map[int32]*sde.SolarSystem{
+				1: {ID: 1, Name: "Src", RegionID: 10000001, Security: 0.9},
+				2: {ID: 2, Name: "Dst", RegionID: 10000002, Security: 0.9},
+			},
+			Regions: map[int32]*sde.Region{
+				10000001: {ID: 10000001, Name: "Src Region"},
+				10000002: {ID: 10000002, Name: "Dst Region"},
+			},
+		},
+	}
+
+	flips := []FlipResult{
+		{
+			TypeID:          2,
+			TypeName:        "Mode Test Item",
+			Volume:          1,
+			BuyPrice:        100,
+			SellPrice:       150,
+			BuySystemID:     1,
+			BuySystemName:   "Src",
+			BuyRegionID:     10000001,
+			BuyRegionName:   "Src Region",
+			SellSystemID:    2,
+			SellSystemName:  "Dst",
+			SellRegionID:    10000002,
+			SellRegionName:  "Dst Region",
+			UnitsToBuy:      10,
+			SellOrderRemain: 1000,
+			BuyOrderRemain:  1000,
+			SellJumps:       1,
+		},
+	}
+
+	t.Run("unit_mode", func(t *testing.T) {
+		hubs, totalItems, _, _ := scanner.BuildRegionalDayTrader(
+			ScanParams{
+				MinItemProfit:     60,
+				MinItemProfitMode: MinItemProfitModeUnit,
+			},
+			flips,
+			nil,
+			nil,
+		)
+		if len(hubs) != 0 || totalItems != 0 {
+			t.Fatalf("expected row filtered in unit mode")
+		}
+	})
+
+	t.Run("order_mode", func(t *testing.T) {
+		hubs, totalItems, _, _ := scanner.BuildRegionalDayTrader(
+			ScanParams{
+				MinItemProfit:     400,
+				MinItemProfitMode: MinItemProfitModeOrder,
+			},
+			flips,
+			nil,
+			nil,
+		)
+		if len(hubs) != 1 || totalItems != 1 {
+			t.Fatalf("expected row kept in order mode, hubs=%d items=%d", len(hubs), totalItems)
+		}
+	})
+}
+
+func TestBuildRegionalDayTrader_ExcludeKeywords(t *testing.T) {
+	scanner := &Scanner{
+		SDE: &sde.Data{
+			Systems: map[int32]*sde.SolarSystem{
+				1: {ID: 1, Name: "Src", RegionID: 1, Security: 0.9},
+				2: {ID: 2, Name: "Dst", RegionID: 2, Security: 0.9},
+			},
+			Regions: map[int32]*sde.Region{
+				1: {ID: 1, Name: "Src"},
+				2: {ID: 2, Name: "Dst"},
+			},
+		},
+	}
+
+	flips := []FlipResult{
+		{
+			TypeID:          10,
+			TypeName:        "Festival Firework Charge",
+			Volume:          1,
+			BuyPrice:        10,
+			SellPrice:       20,
+			BuySystemID:     1,
+			BuySystemName:   "Src",
+			BuyRegionID:     1,
+			BuyRegionName:   "Src",
+			SellSystemID:    2,
+			SellSystemName:  "Dst",
+			SellRegionID:    2,
+			SellRegionName:  "Dst",
+			UnitsToBuy:      10,
+			SellOrderRemain: 10,
+			BuyOrderRemain:  10,
+			SellJumps:       1,
+		},
+	}
+
+	hubs, totalItems, _, _ := scanner.BuildRegionalDayTrader(
+		ScanParams{
+			ExcludeKeywords: []string{"firework"},
+		},
+		flips,
+		nil,
+		nil,
+	)
+	if len(hubs) != 0 || totalItems != 0 {
+		t.Fatalf("expected row filtered by exclude keyword, hubs=%d items=%d", len(hubs), totalItems)
 	}
 }
 
@@ -816,7 +952,7 @@ func TestBuildRegionalDayTrader_ROIUsesStricterFloorInSellOrderMode(t *testing.T
 	}
 
 	hubs, totalItems, _, _ := scanner.BuildRegionalDayTrader(
-		ScanParams{SellOrderMode: true},
+		ScanParams{TradeMode: TradeModeInstantSell},
 		flips,
 		nil,
 		nil,

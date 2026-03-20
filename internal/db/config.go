@@ -9,6 +9,7 @@ import (
 	"strconv"
 
 	"eve-flipper/internal/config"
+	"eve-flipper/internal/engine"
 )
 
 // LoadConfig reads config from SQLite. If empty, returns defaults.
@@ -107,6 +108,9 @@ func (d *DB) LoadConfigForUser(userID string) *config.Config {
 	cfg.MinDailyVolume = parseInt64("min_daily_volume", cfg.MinDailyVolume)
 	cfg.MaxInvestment = parseFloat("max_investment", cfg.MaxInvestment)
 	cfg.MinItemProfit = parseFloat("min_item_profit", cfg.MinItemProfit)
+	if v, ok := m["min_item_profit_mode"]; ok {
+		cfg.MinItemProfitMode = v
+	}
 	cfg.MinS2BPerDay = parseFloat("min_s2b_per_day", cfg.MinS2BPerDay)
 	cfg.MinBfSPerDay = parseFloat("min_bfs_per_day", cfg.MinBfSPerDay)
 	cfg.MinS2BBfSRatio = parseFloat("min_s2b_bfs_ratio", cfg.MinS2BBfSRatio)
@@ -137,7 +141,19 @@ func (d *DB) LoadConfigForUser(userID string) *config.Config {
 			cfg.CategoryIDs = ids
 		}
 	}
+	if v, ok := m["exclude_keywords"]; ok {
+		var keywords []string
+		if err := json.Unmarshal([]byte(v), &keywords); err == nil {
+			cfg.ExcludeKeywords = keywords
+		}
+	}
 	cfg.SellOrderMode = parseBool("sell_order_mode", cfg.SellOrderMode)
+	if v, ok := m["trade_mode"]; ok {
+		cfg.TradeMode = v
+	}
+	cfg.TradeMode = engine.NormalizeTradeMode(cfg.TradeMode)
+	cfg.MinItemProfitMode = engine.NormalizeMinItemProfitMode(cfg.MinItemProfitMode)
+	cfg.SellOrderMode = cfg.TradeMode != engine.TradeModeInstantInstant
 	cfg.AlertTelegram = parseBool("alert_telegram", cfg.AlertTelegram)
 	cfg.AlertDiscord = parseBool("alert_discord", cfg.AlertDiscord)
 	cfg.AlertDesktop = parseBool("alert_desktop", cfg.AlertDesktop)
@@ -180,6 +196,12 @@ func (d *DB) SaveConfigForUser(userID string, cfg *config.Config) error {
 	if b, err := json.Marshal(cfg.CategoryIDs); err == nil {
 		categoryIDsJSON = string(b)
 	}
+	excludeKeywordsJSON := "[]"
+	if b, err := json.Marshal(cfg.ExcludeKeywords); err == nil {
+		excludeKeywordsJSON = string(b)
+	}
+	normalizedTradeMode := engine.NormalizeTradeMode(cfg.TradeMode)
+	legacySellOrderMode := normalizedTradeMode != engine.TradeModeInstantInstant
 
 	pairs := map[string]string{
 		"system_name":               cfg.SystemName,
@@ -198,6 +220,7 @@ func (d *DB) SaveConfigForUser(userID string, cfg *config.Config) error {
 		"min_daily_volume":          strconv.FormatInt(cfg.MinDailyVolume, 10),
 		"max_investment":            fmt.Sprintf("%g", cfg.MaxInvestment),
 		"min_item_profit":           fmt.Sprintf("%g", cfg.MinItemProfit),
+		"min_item_profit_mode":      engine.NormalizeMinItemProfitMode(cfg.MinItemProfitMode),
 		"min_s2b_per_day":           fmt.Sprintf("%g", cfg.MinS2BPerDay),
 		"min_bfs_per_day":           fmt.Sprintf("%g", cfg.MinBfSPerDay),
 		"min_s2b_bfs_ratio":         fmt.Sprintf("%g", cfg.MinS2BBfSRatio),
@@ -214,7 +237,9 @@ func (d *DB) SaveConfigForUser(userID string, cfg *config.Config) error {
 		"target_market_system":      cfg.TargetMarketSystem,
 		"target_market_location_id": strconv.FormatInt(cfg.TargetMarketLocationID, 10),
 		"category_ids":              categoryIDsJSON,
-		"sell_order_mode":           strconv.FormatBool(cfg.SellOrderMode),
+		"exclude_keywords":          excludeKeywordsJSON,
+		"sell_order_mode":           strconv.FormatBool(legacySellOrderMode),
+		"trade_mode":                normalizedTradeMode,
 		"alert_telegram":            strconv.FormatBool(cfg.AlertTelegram),
 		"alert_discord":             strconv.FormatBool(cfg.AlertDiscord),
 		"alert_desktop":             strconv.FormatBool(cfg.AlertDesktop),

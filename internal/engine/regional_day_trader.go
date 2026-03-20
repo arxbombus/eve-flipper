@@ -3,6 +3,7 @@ package engine
 import (
 	"math"
 	"sort"
+	"strings"
 	"sync"
 
 	"eve-flipper/internal/esi"
@@ -107,7 +108,7 @@ func regionalPurchaseDemandDays(params ScanParams) float64 {
 	}
 	// Sell-order mode is less immediate and usually sized below 1 full demand day.
 	// Align default behavior with common "0.5 DoD" workflow.
-	if params.SellOrderMode {
+	if params.UsesSellOrderRevenue() {
 		return 0.5
 	}
 	return 1.0
@@ -255,6 +256,15 @@ func (s *Scanner) BuildRegionalDayTrader(
 	hubDOSWeighted := make(map[int32]float64)
 	hubDOSWeight := make(map[int32]float64)
 	totalItems := 0
+	minItemProfitMode := NormalizeMinItemProfitMode(params.MinItemProfitMode)
+	excludeKeywords := make([]string, 0, len(params.ExcludeKeywords))
+	for _, kw := range params.ExcludeKeywords {
+		trimmed := strings.TrimSpace(strings.ToLower(kw))
+		if trimmed == "" {
+			continue
+		}
+		excludeKeywords = append(excludeKeywords, trimmed)
+	}
 
 	for _, row := range flips {
 		if row.TypeID <= 0 || row.UnitsToBuy <= 0 {
@@ -267,6 +277,19 @@ func (s *Scanner) BuildRegionalDayTrader(
 				if !containsInt32(params.CategoryIDs, typeInfo.CategoryID) {
 					continue
 				}
+			}
+		}
+		if len(excludeKeywords) > 0 {
+			nameLower := strings.ToLower(row.TypeName)
+			excluded := false
+			for _, kw := range excludeKeywords {
+				if strings.Contains(nameLower, kw) {
+					excluded = true
+					break
+				}
+			}
+			if excluded {
+				continue
 			}
 		}
 
@@ -298,7 +321,7 @@ func (s *Scanner) BuildRegionalDayTrader(
 		if row.ExpectedSellPrice > 0 {
 			targetNowPrice = row.ExpectedSellPrice
 		}
-		if params.SellOrderMode {
+		if params.UsesSellOrderRevenue() {
 			if row.TargetLowestSell > 0 {
 				targetNowPrice = row.TargetLowestSell
 			} else if targetStats.avgPrice > 0 {
@@ -311,7 +334,7 @@ func (s *Scanner) BuildRegionalDayTrader(
 			targetNowPrice,
 			row.TargetLowestSell,
 			periodDays,
-			params.SellOrderMode,
+			params.UsesSellOrderRevenue(),
 		)
 		referenceSellPrice := minPositivePrice(targetNowPrice, targetPeriodPrice)
 		referenceSellPrice = minPositivePrice(referenceSellPrice, row.TargetLowestSell)
@@ -322,7 +345,7 @@ func (s *Scanner) BuildRegionalDayTrader(
 		targetDemandPerDay := blendedRegionalDemandPerDay(row, targetStats, periodDays)
 
 		purchaseUnits := row.UnitsToBuy
-		if params.SellOrderMode && row.SellOrderRemain > 0 {
+		if params.UsesSellOrderRevenue() && row.SellOrderRemain > 0 {
 			// In sell-order mode we are not constrained by destination buy-book L1 depth.
 			// Base size on source-side executable availability.
 			purchaseUnits = row.SellOrderRemain
@@ -402,14 +425,23 @@ func (s *Scanner) BuildRegionalDayTrader(
 			jumps = 1
 		}
 
-		shippingCost := shippingRate * row.Volume * float64(purchaseUnits) * float64(jumps)
+		shippingCost := shippingRate * row.Volume * float64(purchaseUnits)
 		unitNowProfit := targetNowPrice*sellRevenueMult - sourceAvgPrice*buyCostMult
 		unitPeriodProfit := targetPeriodPrice*sellRevenueMult - sourceAvgPrice*buyCostMult
 		nowProfit := unitNowProfit*float64(purchaseUnits) - shippingCost
 		periodProfit := unitPeriodProfit*float64(purchaseUnits) - shippingCost
 
-		if params.MinItemProfit > 0 && nowProfit < params.MinItemProfit && periodProfit < params.MinItemProfit {
-			continue
+		if params.MinItemProfit > 0 {
+			switch minItemProfitMode {
+			case MinItemProfitModeOrder:
+				if nowProfit < params.MinItemProfit && periodProfit < params.MinItemProfit {
+					continue
+				}
+			default:
+				if unitNowProfit < params.MinItemProfit && unitPeriodProfit < params.MinItemProfit {
+					continue
+				}
+			}
 		}
 
 		capitalRequired := sourceAvgPrice * buyCostMult * float64(purchaseUnits)
@@ -428,7 +460,7 @@ func (s *Scanner) BuildRegionalDayTrader(
 			// Use a minimum executable capital denominator to keep ranking stable.
 			// Sell-order mode is inherently less certain, so apply a stricter floor.
 			minExecutableCapitalForROI := 200_000.0
-			if params.SellOrderMode {
+			if params.UsesSellOrderRevenue() {
 				minExecutableCapitalForROI = 1_000_000.0
 			}
 			roiDenominator := totalDeployed

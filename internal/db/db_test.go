@@ -441,6 +441,7 @@ func TestDB_ConfigRoundTrip(t *testing.T) {
 		MinDailyVolume:         25,
 		MaxInvestment:          9000000,
 		MinItemProfit:          250000,
+		MinItemProfitMode:      "order",
 		MinS2BPerDay:           2.5,
 		MinBfSPerDay:           1.5,
 		MinS2BBfSRatio:         0.8,
@@ -457,7 +458,9 @@ func TestDB_ConfigRoundTrip(t *testing.T) {
 		TargetMarketSystem:     "Jita",
 		TargetMarketLocationID: 60003760,
 		CategoryIDs:            []int32{6, 8},
+		ExcludeKeywords:        []string{"firework", "civilian"},
 		SellOrderMode:          true,
+		TradeMode:              engine.TradeModeBuyOrderToSell,
 		AlertTelegram:          true,
 		AlertDiscord:           true,
 		AlertDesktop:           false,
@@ -493,8 +496,8 @@ func TestDB_ConfigRoundTrip(t *testing.T) {
 	if got.TargetMarketSystem != "Jita" || got.TargetMarketLocationID != 60003760 {
 		t.Errorf("LoadConfig target market mismatch: system=%q location=%d", got.TargetMarketSystem, got.TargetMarketLocationID)
 	}
-	if !got.SellOrderMode || len(got.CategoryIDs) != 2 || len(got.SourceRegions) != 2 {
-		t.Errorf("LoadConfig region arrays/flags mismatch: sell_mode=%v categories=%v sources=%v", got.SellOrderMode, got.CategoryIDs, got.SourceRegions)
+	if !got.SellOrderMode || got.TradeMode != engine.TradeModeBuyOrderToSell || got.MinItemProfitMode != "order" || len(got.CategoryIDs) != 2 || len(got.ExcludeKeywords) != 2 || len(got.SourceRegions) != 2 {
+		t.Errorf("LoadConfig region arrays/flags mismatch: sell_mode=%v trade_mode=%q min_profit_mode=%q categories=%v excludes=%v sources=%v", got.SellOrderMode, got.TradeMode, got.MinItemProfitMode, got.CategoryIDs, got.ExcludeKeywords, got.SourceRegions)
 	}
 }
 

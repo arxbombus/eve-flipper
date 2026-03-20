@@ -368,7 +368,7 @@ func Done(details string) {
 // Server prints the server listening message
 func Server(addr string) {
 	emit("\n")
-	Success("SERVER", "Listening on "+colorize(cyan+bold, "http://"+addr))
+	Success("SERVER", "Listening on "+colorize(cyan+bold, "http://"+addr+"(http://localhost:13370/)"))
 	emit(fmt.Sprintf("%s %s %s\n", strings.Repeat(" ", 12), messageSeparator(), colorize(dim, "Press Ctrl+C to stop")))
 	emit("\n")
 }
