@@ -793,6 +793,19 @@ func (s *Scanner) calculateResults(
 			candidateTypes[typeID] = struct{}{}
 		}
 	}
+	if len(params.IncludeTypeIDs) > 0 {
+		allowed := make(map[int32]struct{}, len(params.IncludeTypeIDs))
+		for _, typeID := range params.IncludeTypeIDs {
+			if typeID > 0 {
+				allowed[typeID] = struct{}{}
+			}
+		}
+		for typeID := range candidateTypes {
+			if _, ok := allowed[typeID]; !ok {
+				delete(candidateTypes, typeID)
+			}
+		}
+	}
 
 	for typeID := range candidateTypes {
 		if isMarketDisabledType(typeID) {

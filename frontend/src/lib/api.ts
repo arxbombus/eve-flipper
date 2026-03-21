@@ -18,6 +18,9 @@ import type {
   ExecutionPlanResult,
   FlipResult,
   HotZonesResponse,
+  ImportExportRoute,
+  ImportExportRouteAnalysis,
+  ImportExportRouteItem,
   IndustryJob,
   IndustryJobStatus,
   IndustryLedger,
@@ -49,6 +52,7 @@ import type {
   StationTrade,
   StationTradeState,
   StationTradeStateMode,
+  ItemSearchResult,
   UndercutStatus,
   WatchlistItem,
   SystemDanger,
@@ -299,6 +303,100 @@ export async function getSystemsList(
   const res = await apiFetch(`${BASE}/api/systems${qs ? `?${qs}` : ""}`, { signal });
   const data = await handleResponse<{ systems?: SolarSystemInfo[] }>(res);
   return data.systems ?? [];
+}
+
+export async function searchItems(query: string, limit = 20, signal?: AbortSignal): Promise<ItemSearchResult[]> {
+  const res = await apiFetch(`${BASE}/api/items/search?q=${encodeURIComponent(query)}&limit=${limit}`, { signal });
+  return handleResponse<ItemSearchResult[]>(res);
+}
+
+export async function getImportExportRoutes(): Promise<ImportExportRoute[]> {
+  const res = await apiFetch(`${BASE}/api/import-export/routes`);
+  return handleResponse<ImportExportRoute[]>(res);
+}
+
+export async function createImportExportRoute(payload: {
+  name: string;
+  source_region_name: string;
+  target_market_system_name: string;
+  target_market_location_id: number;
+  target_market_location_name: string;
+  include_structures: boolean;
+  avg_price_period: number;
+  purchase_demand_days: number;
+  trade_mode: string;
+  shipping_mode: "per_route" | "per_jump";
+  shipping_cost_per_m3_jump: number;
+  buy_broker_fee_percent: number;
+  buy_sales_tax_percent: number;
+  sell_broker_fee_percent: number;
+  sell_sales_tax_percent: number;
+}): Promise<ImportExportRoute> {
+  const res = await apiFetch(`${BASE}/api/import-export/routes`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+  });
+  return handleResponse<ImportExportRoute>(res);
+}
+
+export async function updateImportExportRoute(
+  routeId: number,
+  payload: {
+    name: string;
+    source_region_name: string;
+    target_market_system_name: string;
+    target_market_location_id: number;
+    target_market_location_name: string;
+    include_structures: boolean;
+    avg_price_period: number;
+    purchase_demand_days: number;
+    trade_mode: string;
+    shipping_mode: "per_route" | "per_jump";
+    shipping_cost_per_m3_jump: number;
+    buy_broker_fee_percent: number;
+    buy_sales_tax_percent: number;
+    sell_broker_fee_percent: number;
+    sell_sales_tax_percent: number;
+  },
+): Promise<ImportExportRoute> {
+  const res = await apiFetch(`${BASE}/api/import-export/routes/${routeId}`, {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+  });
+  return handleResponse<ImportExportRoute>(res);
+}
+
+export async function deleteImportExportRoute(routeId: number): Promise<{ ok: boolean }> {
+  const res = await apiFetch(`${BASE}/api/import-export/routes/${routeId}`, {
+    method: "DELETE",
+  });
+  return handleResponse<{ ok: boolean }>(res);
+}
+
+export async function addImportExportRouteItem(
+  routeId: number,
+  payload: { type_id: number; type_name: string; category_id: number; group_id: number; group_name: string },
+): Promise<ImportExportRouteItem> {
+  const res = await apiFetch(`${BASE}/api/import-export/routes/${routeId}/items`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+  });
+  return handleResponse<ImportExportRouteItem>(res);
+}
+
+export async function deleteImportExportRouteItem(routeId: number, itemId: number): Promise<{ ok: boolean }> {
+  const res = await apiFetch(`${BASE}/api/import-export/routes/${routeId}/items/${itemId}`, {
+    method: "DELETE",
+  });
+  return handleResponse<{ ok: boolean }>(res);
+}
+
+export async function analyzeImportExportRoute(routeId: number): Promise<ImportExportRouteAnalysis> {
+  const res = await apiFetch(`${BASE}/api/import-export/routes/${routeId}/analysis`);
+  return handleResponse<ImportExportRouteAnalysis>(res);
 }
 
 export async function scan(

@@ -262,6 +262,7 @@ func (d *Data) loadTypes(dir string) error {
 		if vol == 0 {
 			vol = t.Volume
 		}
+		vol = packagedVolumeFallback(groupCategories[t.GroupID], d.groupName(t.GroupID), name, vol)
 		d.Types[t.Key] = &ItemType{
 			ID:         t.Key,
 			Name:       name,
@@ -272,6 +273,76 @@ func (d *Data) loadTypes(dir string) error {
 		}
 		return nil
 	})
+}
+
+func (d *Data) groupName(groupID int32) string {
+	if g, ok := d.Groups[groupID]; ok {
+		return g.Name
+	}
+	return ""
+}
+
+func packagedVolumeFallback(categoryID int32, groupName, typeName string, current float64) float64 {
+	if current <= 0 {
+		return current
+	}
+	gn := strings.ToLower(strings.TrimSpace(groupName))
+	tn := strings.ToLower(strings.TrimSpace(typeName))
+	if categoryID == 6 {
+		switch {
+		case strings.Contains(gn, "frigate"):
+			return 2500
+		case strings.Contains(gn, "destroyer"):
+			return 5000
+		case strings.Contains(gn, "cruiser"):
+			return 10000
+		case strings.Contains(gn, "battlecruiser"):
+			return 15000
+		case strings.Contains(gn, "battleship"):
+			return 50000
+		case strings.Contains(gn, "industrial command ship"):
+			return 500000
+		case strings.Contains(gn, "industrial"):
+			return 20000
+		case strings.Contains(gn, "freighter"):
+			return 1300000
+		case strings.Contains(gn, "carrier"), strings.Contains(gn, "dreadnought"), strings.Contains(gn, "force auxiliary"):
+			return 1300000
+		case strings.Contains(gn, "supercarrier"), strings.Contains(gn, "titan"):
+			return 10000000
+		case strings.Contains(gn, "shuttle"):
+			return 500
+		case strings.Contains(gn, "corvette"):
+			return 2500
+		}
+	}
+	if categoryID == 2 {
+		switch {
+		case strings.Contains(tn, "small standard container"),
+			strings.Contains(tn, "small secure container"),
+			strings.Contains(tn, "small audit log secure container"):
+			return 100
+		case strings.Contains(tn, "medium standard container"),
+			strings.Contains(tn, "medium secure container"),
+			strings.Contains(tn, "medium audit log secure container"):
+			return 325
+		case strings.Contains(tn, "large standard container"),
+			strings.Contains(tn, "large secure container"),
+			strings.Contains(tn, "large audit log secure container"):
+			return 650
+		case strings.Contains(tn, "huge secure container"),
+			strings.Contains(tn, "huge freight container"):
+			return 1500
+		case strings.Contains(tn, "giant secure container"),
+			strings.Contains(tn, "giant freight container"):
+			return 3000
+		case strings.Contains(tn, "station container"),
+			strings.Contains(tn, "station vault"),
+			strings.Contains(tn, "warehouse"):
+			return 1000
+		}
+	}
+	return current
 }
 
 func isRigGroupName(categoryID int32, groupName string) bool {

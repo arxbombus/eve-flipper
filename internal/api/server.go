@@ -715,11 +715,19 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /api/systems", s.handleGetSystems)
 	mux.HandleFunc("GET /api/systems/autocomplete", s.handleAutocomplete)
 	mux.HandleFunc("GET /api/regions/autocomplete", s.handleRegionAutocomplete)
+	mux.HandleFunc("GET /api/items/search", s.handleSearchItems)
 	mux.HandleFunc("POST /api/scan", s.handleScan)
 	mux.HandleFunc("POST /api/scan/multi-region", s.handleScanMultiRegion)
 	mux.HandleFunc("POST /api/scan/regional-day", s.handleScanRegionalDay)
 	mux.HandleFunc("POST /api/scan/contracts", s.handleScanContracts)
 	mux.HandleFunc("POST /api/route/find", s.handleRouteFind)
+	mux.HandleFunc("GET /api/import-export/routes", s.handleGetImportExportRoutes)
+	mux.HandleFunc("POST /api/import-export/routes", s.handleCreateImportExportRoute)
+	mux.HandleFunc("PUT /api/import-export/routes/{id}", s.handleUpdateImportExportRoute)
+	mux.HandleFunc("DELETE /api/import-export/routes/{id}", s.handleDeleteImportExportRoute)
+	mux.HandleFunc("POST /api/import-export/routes/{id}/items", s.handleAddImportExportRouteItem)
+	mux.HandleFunc("DELETE /api/import-export/routes/{id}/items/{itemID}", s.handleDeleteImportExportRouteItem)
+	mux.HandleFunc("GET /api/import-export/routes/{id}/analysis", s.handleAnalyzeImportExportRoute)
 	mux.HandleFunc("GET /api/watchlist", s.handleGetWatchlist)
 	mux.HandleFunc("POST /api/watchlist", s.handleAddWatchlist)
 	mux.HandleFunc("DELETE /api/watchlist/{typeID}", s.handleDeleteWatchlist)
@@ -2066,6 +2074,65 @@ func (s *Server) handleRegionAutocomplete(w http.ResponseWriter, r *http.Request
 	writeJSON(w, map[string][]string{"regions": result})
 }
 
+type searchItemRow struct {
+	TypeID     int32   `json:"type_id"`
+	TypeName   string  `json:"type_name"`
+	Volume     float64 `json:"volume"`
+	GroupID    int32   `json:"group_id"`
+	GroupName  string  `json:"group_name"`
+	CategoryID int32   `json:"category_id"`
+}
+
+func (s *Server) handleSearchItems(w http.ResponseWriter, r *http.Request) {
+	if !s.isReady() {
+		writeJSON(w, []searchItemRow{})
+		return
+	}
+	q := strings.ToLower(strings.TrimSpace(r.URL.Query().Get("q")))
+	limit := 20
+	if raw := strings.TrimSpace(r.URL.Query().Get("limit")); raw != "" {
+		if v, err := strconv.Atoi(raw); err == nil && v > 0 && v <= 100 {
+			limit = v
+		}
+	}
+	if q == "" {
+		writeJSON(w, []searchItemRow{})
+		return
+	}
+
+	s.mu.RLock()
+	types := s.sdeData.Types
+	s.mu.RUnlock()
+
+	var prefix, contains []searchItemRow
+	for _, item := range types {
+		nameLower := strings.ToLower(item.Name)
+		row := searchItemRow{
+			TypeID:     item.ID,
+			TypeName:   item.Name,
+			Volume:     item.Volume,
+			GroupID:    item.GroupID,
+			CategoryID: item.CategoryID,
+		}
+		if group, ok := s.sdeData.Groups[item.GroupID]; ok {
+			row.GroupName = group.Name
+		}
+		if strings.HasPrefix(nameLower, q) {
+			prefix = append(prefix, row)
+		} else if strings.Contains(nameLower, q) {
+			contains = append(contains, row)
+		}
+	}
+
+	sort.Slice(prefix, func(i, j int) bool { return prefix[i].TypeName < prefix[j].TypeName })
+	sort.Slice(contains, func(i, j int) bool { return contains[i].TypeName < contains[j].TypeName })
+	rows := append(prefix, contains...)
+	if len(rows) > limit {
+		rows = rows[:limit]
+	}
+	writeJSON(w, rows)
+}
+
 func normalizeIgnoredSystemIDs(systems map[int32]*sde.SolarSystem, ids []int32) []int32 {
 	if len(ids) == 0 || len(systems) == 0 {
 		return nil
@@ -2157,6 +2224,248 @@ type scanRequest struct {
 	TradeMode string `json:"trade_mode"`
 	// Player structures
 	IncludeStructures bool `json:"include_structures"`
+}
+
+type importExportRouteRequest struct {
+	Name                     string  `json:"name"`
+	SourceRegionName         string  `json:"source_region_name"`
+	TargetMarketSystemName   string  `json:"target_market_system_name"`
+	TargetMarketLocationID   int64   `json:"target_market_location_id"`
+	TargetMarketLocationName string  `json:"target_market_location_name"`
+	IncludeStructures        bool    `json:"include_structures"`
+	AvgPricePeriod           int     `json:"avg_price_period"`
+	PurchaseDemandDays       float64 `json:"purchase_demand_days"`
+	TradeMode                string  `json:"trade_mode"`
+	ShippingMode             string  `json:"shipping_mode"`
+	ShippingCostPerM3Jump    float64 `json:"shipping_cost_per_m3_jump"`
+	BuyBrokerFeePercent      float64 `json:"buy_broker_fee_percent"`
+	BuySalesTaxPercent       float64 `json:"buy_sales_tax_percent"`
+	SellBrokerFeePercent     float64 `json:"sell_broker_fee_percent"`
+	SellSalesTaxPercent      float64 `json:"sell_sales_tax_percent"`
+}
+
+type importExportRouteItemRequest struct {
+	TypeID     int32  `json:"type_id"`
+	TypeName   string `json:"type_name"`
+	CategoryID int32  `json:"category_id"`
+	GroupID    int32  `json:"group_id"`
+	GroupName  string `json:"group_name"`
+}
+
+type importExportRouteResponse struct {
+	config.ImportExportRoute
+	Items []config.ImportExportRouteItem `json:"items"`
+}
+
+func (s *Server) parseImportExportRoute(req importExportRouteRequest) (config.ImportExportRoute, error) {
+	if !s.isReady() {
+		return config.ImportExportRoute{}, fmt.Errorf("SDE not loaded yet")
+	}
+
+	sourceRegionName := strings.TrimSpace(req.SourceRegionName)
+	targetSystemName := strings.TrimSpace(req.TargetMarketSystemName)
+	if sourceRegionName == "" || targetSystemName == "" {
+		return config.ImportExportRoute{}, fmt.Errorf("source region and destination system are required")
+	}
+
+	s.mu.RLock()
+	sourceRegionID, sourceOK := s.sdeData.RegionByName[strings.ToLower(sourceRegionName)]
+	targetSystemID, targetOK := s.sdeData.SystemByName[strings.ToLower(targetSystemName)]
+	s.mu.RUnlock()
+
+	if !sourceOK {
+		return config.ImportExportRoute{}, fmt.Errorf("source region not found: %s", sourceRegionName)
+	}
+	if !targetOK {
+		return config.ImportExportRoute{}, fmt.Errorf("target system not found: %s", targetSystemName)
+	}
+
+	return config.ImportExportRoute{
+		Name:                     strings.TrimSpace(req.Name),
+		SourceRegionID:           sourceRegionID,
+		SourceRegionName:         sourceRegionName,
+		TargetMarketSystemID:     targetSystemID,
+		TargetMarketSystemName:   targetSystemName,
+		TargetMarketLocationID:   req.TargetMarketLocationID,
+		TargetMarketLocationName: strings.TrimSpace(req.TargetMarketLocationName),
+		IncludeStructures:        req.IncludeStructures,
+		AvgPricePeriod:           req.AvgPricePeriod,
+		PurchaseDemandDays:       req.PurchaseDemandDays,
+		TradeMode:                engine.NormalizeTradeMode(req.TradeMode),
+		ShippingMode:             req.ShippingMode,
+		ShippingCostPerM3Jump:    req.ShippingCostPerM3Jump,
+		BuyBrokerFeePercent:      req.BuyBrokerFeePercent,
+		BuySalesTaxPercent:       req.BuySalesTaxPercent,
+		SellBrokerFeePercent:     req.SellBrokerFeePercent,
+		SellSalesTaxPercent:      req.SellSalesTaxPercent,
+	}, nil
+}
+
+func (s *Server) handleGetImportExportRoutes(w http.ResponseWriter, r *http.Request) {
+	userID := userIDFromRequest(r)
+	routes, err := s.db.ListImportExportRoutesForUser(userID)
+	if err != nil {
+		writeError(w, 500, err.Error())
+		return
+	}
+	resp := make([]importExportRouteResponse, 0, len(routes))
+	for _, route := range routes {
+		items, itemsErr := s.db.ListImportExportRouteItemsForUser(userID, route.ID)
+		if itemsErr != nil {
+			writeError(w, 500, itemsErr.Error())
+			return
+		}
+		resp = append(resp, importExportRouteResponse{
+			ImportExportRoute: route,
+			Items:             items,
+		})
+	}
+	writeJSON(w, resp)
+}
+
+func (s *Server) handleCreateImportExportRoute(w http.ResponseWriter, r *http.Request) {
+	userID := userIDFromRequest(r)
+	var req importExportRouteRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, 400, "invalid json")
+		return
+	}
+	route, err := s.parseImportExportRoute(req)
+	if err != nil {
+		writeError(w, 400, err.Error())
+		return
+	}
+	created, err := s.db.CreateImportExportRouteForUser(userID, route)
+	if err != nil {
+		writeError(w, 500, err.Error())
+		return
+	}
+	writeJSON(w, importExportRouteResponse{ImportExportRoute: created, Items: []config.ImportExportRouteItem{}})
+}
+
+func (s *Server) handleUpdateImportExportRoute(w http.ResponseWriter, r *http.Request) {
+	userID := userIDFromRequest(r)
+	routeID, err := strconv.ParseInt(r.PathValue("id"), 10, 64)
+	if err != nil || routeID <= 0 {
+		writeError(w, 400, "invalid route id")
+		return
+	}
+	var req importExportRouteRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, 400, "invalid json")
+		return
+	}
+	route, err := s.parseImportExportRoute(req)
+	if err != nil {
+		writeError(w, 400, err.Error())
+		return
+	}
+	updated, err := s.db.UpdateImportExportRouteForUser(userID, routeID, route)
+	if err != nil {
+		writeError(w, 500, err.Error())
+		return
+	}
+	items, err := s.db.ListImportExportRouteItemsForUser(userID, routeID)
+	if err != nil {
+		writeError(w, 500, err.Error())
+		return
+	}
+	writeJSON(w, importExportRouteResponse{ImportExportRoute: updated, Items: items})
+}
+
+func (s *Server) handleDeleteImportExportRoute(w http.ResponseWriter, r *http.Request) {
+	userID := userIDFromRequest(r)
+	routeID, err := strconv.ParseInt(r.PathValue("id"), 10, 64)
+	if err != nil || routeID <= 0 {
+		writeError(w, 400, "invalid route id")
+		return
+	}
+	if err := s.db.DeleteImportExportRouteForUser(userID, routeID); err != nil {
+		writeError(w, 500, err.Error())
+		return
+	}
+	writeJSON(w, map[string]bool{"ok": true})
+}
+
+func (s *Server) handleAddImportExportRouteItem(w http.ResponseWriter, r *http.Request) {
+	userID := userIDFromRequest(r)
+	routeID, err := strconv.ParseInt(r.PathValue("id"), 10, 64)
+	if err != nil || routeID <= 0 {
+		writeError(w, 400, "invalid route id")
+		return
+	}
+	var req importExportRouteItemRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, 400, "invalid json")
+		return
+	}
+	item, err := s.db.AddImportExportRouteItemForUser(userID, routeID, config.ImportExportRouteItem{
+		TypeID:     req.TypeID,
+		TypeName:   strings.TrimSpace(req.TypeName),
+		CategoryID: req.CategoryID,
+		GroupID:    req.GroupID,
+		GroupName:  strings.TrimSpace(req.GroupName),
+	})
+	if err != nil {
+		writeError(w, 400, err.Error())
+		return
+	}
+	writeJSON(w, item)
+}
+
+func (s *Server) handleDeleteImportExportRouteItem(w http.ResponseWriter, r *http.Request) {
+	userID := userIDFromRequest(r)
+	routeID, err := strconv.ParseInt(r.PathValue("id"), 10, 64)
+	if err != nil || routeID <= 0 {
+		writeError(w, 400, "invalid route id")
+		return
+	}
+	itemID, err := strconv.ParseInt(r.PathValue("itemID"), 10, 64)
+	if err != nil || itemID <= 0 {
+		writeError(w, 400, "invalid item id")
+		return
+	}
+	if err := s.db.DeleteImportExportRouteItemForUser(userID, routeID, itemID); err != nil {
+		writeError(w, 500, err.Error())
+		return
+	}
+	writeJSON(w, map[string]bool{"ok": true})
+}
+
+func (s *Server) handleAnalyzeImportExportRoute(w http.ResponseWriter, r *http.Request) {
+	userID := userIDFromRequest(r)
+	routeID, err := strconv.ParseInt(r.PathValue("id"), 10, 64)
+	if err != nil || routeID <= 0 {
+		writeError(w, 400, "invalid route id")
+		return
+	}
+	route, err := s.db.GetImportExportRouteForUser(userID, routeID)
+	if err != nil {
+		writeError(w, 404, "route not found")
+		return
+	}
+	items, err := s.db.ListImportExportRouteItemsForUser(userID, routeID)
+	if err != nil {
+		writeError(w, 500, err.Error())
+		return
+	}
+
+	s.mu.RLock()
+	scanner := s.scanner
+	s.mu.RUnlock()
+	accessToken := ""
+	if route.IncludeStructures && s.sessions != nil {
+		if token, tokenErr := s.sessions.EnsureValidTokenForUser(s.sso, userID); tokenErr == nil {
+			accessToken = token
+		}
+	}
+
+	analysis, err := scanner.AnalyzeImportExportRoute(route, items, accessToken)
+	if err != nil {
+		writeError(w, 500, err.Error())
+		return
+	}
+	writeJSON(w, analysis)
 }
 
 func (s *Server) parseScanParams(req scanRequest) (engine.ScanParams, error) {

@@ -63,29 +63,42 @@ type FlipResult struct {
 	SlippageSellPct   float64 `json:"SlippageSellPct,omitempty"`
 
 	// Regional day-trader enrichments (EVE Guru-style grouped region view).
-	DaySecurity           float64   `json:"DaySecurity,omitempty"`
-	DaySourceUnits        int32     `json:"DaySourceUnits,omitempty"`
-	DayTargetDemandPerDay float64   `json:"DayTargetDemandPerDay,omitempty"`
-	DayTargetSupplyUnits  int64     `json:"DayTargetSupplyUnits,omitempty"`
-	DayTargetDOS          float64   `json:"DayTargetDOS,omitempty"`
-	DayAssets             int64     `json:"DayAssets,omitempty"`
-	DayActiveOrders       int64     `json:"DayActiveOrders,omitempty"`
-	DaySourceAvgPrice     float64   `json:"DaySourceAvgPrice,omitempty"`
-	DayTargetNowPrice     float64   `json:"DayTargetNowPrice,omitempty"`
-	DayTargetPeriodPrice  float64   `json:"DayTargetPeriodPrice,omitempty"`
-	DayNowProfit          float64   `json:"DayNowProfit,omitempty"`
-	DayPeriodProfit       float64   `json:"DayPeriodProfit,omitempty"`
-	DayROINow             float64   `json:"DayROINow,omitempty"`
-	DayROIPeriod          float64   `json:"DayROIPeriod,omitempty"`
-	DayCapitalRequired    float64   `json:"DayCapitalRequired,omitempty"`
-	DayShippingCost       float64   `json:"DayShippingCost,omitempty"`
-	DayCategoryID         int32     `json:"DayCategoryID,omitempty"`
-	DayGroupID            int32     `json:"DayGroupID,omitempty"`
-	DayGroupName          string    `json:"DayGroupName,omitempty"`
-	DayIskPerM3Jump       float64   `json:"DayIskPerM3Jump,omitempty"`
-	DayTradeScore         float64   `json:"DayTradeScore,omitempty"`
-	DayPriceHistory       []float64 `json:"DayPriceHistory,omitempty"`
-	DayTargetLowestSell   float64   `json:"DayTargetLowestSell,omitempty"`
+	DaySecurity                     float64   `json:"DaySecurity,omitempty"`
+	DaySourceUnits                  int32     `json:"DaySourceUnits,omitempty"`
+	DayTargetDemandPerDay           float64   `json:"DayTargetDemandPerDay,omitempty"`
+	DayTargetHistoricalDemandPerDay float64   `json:"DayTargetHistoricalDemandPerDay,omitempty"`
+	DayTargetSupplyUnits            int64     `json:"DayTargetSupplyUnits,omitempty"`
+	DayTargetDOS                    float64   `json:"DayTargetDOS,omitempty"`
+	DayAssets                       int64     `json:"DayAssets,omitempty"`
+	DayActiveOrders                 int64     `json:"DayActiveOrders,omitempty"`
+	DaySourceAvgPrice               float64   `json:"DaySourceAvgPrice,omitempty"`
+	DayTargetNowPrice               float64   `json:"DayTargetNowPrice,omitempty"`
+	DayTargetPeriodPrice            float64   `json:"DayTargetPeriodPrice,omitempty"`
+	DayNowProfit                    float64   `json:"DayNowProfit,omitempty"`
+	DayPeriodProfit                 float64   `json:"DayPeriodProfit,omitempty"`
+	DayROINow                       float64   `json:"DayROINow,omitempty"`
+	DayROIPeriod                    float64   `json:"DayROIPeriod,omitempty"`
+	DayCapitalRequired              float64   `json:"DayCapitalRequired,omitempty"`
+	DayShippingCost                 float64   `json:"DayShippingCost,omitempty"`
+	DaySourceGross                  float64   `json:"DaySourceGross,omitempty"`
+	DaySourceTotal                  float64   `json:"DaySourceTotal,omitempty"`
+	DayTargetGross                  float64   `json:"DayTargetGross,omitempty"`
+	DayTargetTotal                  float64   `json:"DayTargetTotal,omitempty"`
+	DayBuyOrderFees                 float64   `json:"DayBuyOrderFees,omitempty"`
+	DayBuyBrokerFees                float64   `json:"DayBuyBrokerFees,omitempty"`
+	DayBuySalesTaxes                float64   `json:"DayBuySalesTaxes,omitempty"`
+	DayBuySCCSurcharge              float64   `json:"DayBuySCCSurcharge,omitempty"`
+	DaySellOrderFees                float64   `json:"DaySellOrderFees,omitempty"`
+	DaySellBrokerFees               float64   `json:"DaySellBrokerFees,omitempty"`
+	DaySellSalesTaxes               float64   `json:"DaySellSalesTaxes,omitempty"`
+	DaySellSCCSurcharge             float64   `json:"DaySellSCCSurcharge,omitempty"`
+	DayCategoryID                   int32     `json:"DayCategoryID,omitempty"`
+	DayGroupID                      int32     `json:"DayGroupID,omitempty"`
+	DayGroupName                    string    `json:"DayGroupName,omitempty"`
+	DayIskPerM3Jump                 float64   `json:"DayIskPerM3Jump,omitempty"`
+	DayTradeScore                   float64   `json:"DayTradeScore,omitempty"`
+	DayPriceHistory                 []float64 `json:"DayPriceHistory,omitempty"`
+	DayTargetLowestSell             float64   `json:"DayTargetLowestSell,omitempty"`
 }
 
 // ContractResult represents a profitable public contract compared to market value.
@@ -208,9 +221,13 @@ type ScanParams struct {
 	AvgPricePeriod     int     // 0 = default period (14 days for regional day trader)
 	// Heuristic hauling cost model: ISK per m3 used by regional day trader scoring.
 	ShippingCostPerM3Jump float64 // 0 = disabled (kept for API/config compatibility)
+	ShippingMode          string  // "per_route" or "per_jump" for import/export hauling math
 	// Optional source-side region constraints for regional day trader.
 	// Empty = use legacy buy-radius scope from CurrentSystemID.
 	SourceRegionIDs []int32
+	// Optional tracked type filter for module-specific scans.
+	// Empty = all candidate market types in scope.
+	IncludeTypeIDs []int32
 	// Optional sell-side target marketplace constraints for regional day trader.
 	TargetMarketSystemID   int32   // 0 = any sell system in scope
 	TargetMarketLocationID int64   // 0 = any location in target system/region

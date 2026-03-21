@@ -1212,6 +1212,59 @@ func (d *DB) migrate() error {
 		logger.Info("DB", "Applied migration v27 (regional day-trader history rows)")
 	}
 
+	if version < 28 {
+		_, err := d.sql.Exec(`
+			CREATE TABLE IF NOT EXISTS import_export_routes (
+				id                          INTEGER PRIMARY KEY AUTOINCREMENT,
+				user_id                     TEXT NOT NULL,
+				name                        TEXT NOT NULL,
+				source_region_id            INTEGER NOT NULL,
+				source_region_name          TEXT NOT NULL,
+				target_market_system_id     INTEGER NOT NULL,
+				target_market_system_name   TEXT NOT NULL,
+				target_market_location_id   INTEGER NOT NULL DEFAULT 0,
+				target_market_location_name TEXT NOT NULL DEFAULT '',
+				include_structures          INTEGER NOT NULL DEFAULT 0,
+				avg_price_period            INTEGER NOT NULL DEFAULT 14,
+				purchase_demand_days        REAL NOT NULL DEFAULT 0.5,
+				trade_mode                  TEXT NOT NULL DEFAULT 'instant_instant',
+				shipping_mode               TEXT NOT NULL DEFAULT 'per_route',
+				shipping_cost_per_m3_jump   REAL NOT NULL DEFAULT 0,
+				buy_broker_fee_percent      REAL NOT NULL DEFAULT 0,
+				buy_sales_tax_percent       REAL NOT NULL DEFAULT 0,
+				sell_broker_fee_percent     REAL NOT NULL DEFAULT 0,
+				sell_sales_tax_percent      REAL NOT NULL DEFAULT 8,
+				created_at                  TEXT NOT NULL,
+				updated_at                  TEXT NOT NULL
+			);
+			CREATE INDEX IF NOT EXISTS idx_import_export_routes_user_updated
+				ON import_export_routes(user_id, updated_at DESC);
+			CREATE UNIQUE INDEX IF NOT EXISTS idx_import_export_routes_user_name
+				ON import_export_routes(user_id, name);
+
+			CREATE TABLE IF NOT EXISTS import_export_route_items (
+				id           INTEGER PRIMARY KEY AUTOINCREMENT,
+				route_id      INTEGER NOT NULL REFERENCES import_export_routes(id) ON DELETE CASCADE,
+				type_id       INTEGER NOT NULL,
+				type_name     TEXT NOT NULL,
+				category_id   INTEGER NOT NULL DEFAULT 0,
+				group_id      INTEGER NOT NULL DEFAULT 0,
+				group_name    TEXT NOT NULL DEFAULT '',
+				added_at      TEXT NOT NULL
+			);
+			CREATE INDEX IF NOT EXISTS idx_import_export_route_items_route_added
+				ON import_export_route_items(route_id, added_at DESC);
+			CREATE UNIQUE INDEX IF NOT EXISTS idx_import_export_route_items_unique
+				ON import_export_route_items(route_id, type_id);
+
+			INSERT OR IGNORE INTO schema_version (version) VALUES (28);
+		`)
+		if err != nil {
+			return fmt.Errorf("migration v28: %w", err)
+		}
+		logger.Info("DB", "Applied migration v28 (import/export routes)")
+	}
+
 	return nil
 }
 

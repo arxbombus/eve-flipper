@@ -56,7 +56,7 @@ export function TabSettingsPanel({
           onClick={toggle}
           className="flex items-center gap-2 text-left hover:bg-eve-accent/5 transition-colors rounded-sm px-1 -ml-1"
         >
-          <span className="text-eve-accent text-sm">{icon}</span>
+          {icon && <span className="text-eve-accent text-sm">{icon}</span>}
           <span className="text-sm font-medium text-eve-text">{title}</span>
           {hint && <span className="text-xs text-eve-dim hidden sm:inline">— {hint}</span>}
           <span className="text-eve-dim text-xs">{expanded ? "▲" : "▼"}</span>

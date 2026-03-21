@@ -55,6 +55,7 @@ export interface FlipResult {
   DaySecurity?: number;
   DaySourceUnits?: number;
   DayTargetDemandPerDay?: number;
+  DayTargetHistoricalDemandPerDay?: number;
   DayTargetSupplyUnits?: number;
   DayTargetDOS?: number;
   DayAssets?: number;
@@ -68,6 +69,18 @@ export interface FlipResult {
   DayROIPeriod?: number;
   DayCapitalRequired?: number;
   DayShippingCost?: number;
+  DaySourceGross?: number;
+  DaySourceTotal?: number;
+  DayTargetGross?: number;
+  DayTargetTotal?: number;
+  DayBuyOrderFees?: number;
+  DayBuyBrokerFees?: number;
+  DayBuySalesTaxes?: number;
+  DayBuySCCSurcharge?: number;
+  DaySellOrderFees?: number;
+  DaySellBrokerFees?: number;
+  DaySellSalesTaxes?: number;
+  DaySellSCCSurcharge?: number;
   DayCategoryID?: number;
   DayGroupID?: number;
   DayGroupName?: string;
@@ -404,6 +417,93 @@ export type RegionalTradeMode =
   | "instant_sell_order"
   | "buy_order_sell_order";
 export type MinItemProfitMode = "unit" | "order";
+
+export interface ItemSearchResult {
+  type_id: number;
+  type_name: string;
+  volume: number;
+  group_id: number;
+  group_name: string;
+  category_id: number;
+}
+
+export interface ImportExportRouteItem {
+  id: number;
+  route_id: number;
+  type_id: number;
+  type_name: string;
+  category_id: number;
+  group_id: number;
+  group_name: string;
+  added_at: string;
+}
+
+export interface ImportExportRoute {
+  id: number;
+  name: string;
+  source_region_id: number;
+  source_region_name: string;
+  target_market_system_id: number;
+  target_market_system_name: string;
+  target_market_location_id: number;
+  target_market_location_name: string;
+  include_structures: boolean;
+  avg_price_period: number;
+  purchase_demand_days: number;
+  trade_mode: RegionalTradeMode;
+  shipping_mode: "per_route" | "per_jump";
+  shipping_cost_per_m3_jump: number;
+  buy_broker_fee_percent: number;
+  buy_sales_tax_percent: number;
+  sell_broker_fee_percent: number;
+  sell_sales_tax_percent: number;
+  created_at: string;
+  updated_at: string;
+  items: ImportExportRouteItem[];
+}
+
+export interface ImportExportScenarioBrief {
+  key: string;
+  label: string;
+  trade_mode: RegionalTradeMode;
+  purchase_units: number;
+  source_price: number;
+  source_gross: number;
+  source_total: number;
+  target_now_price: number;
+  target_period_price: number;
+  target_gross: number;
+  target_total: number;
+  buy_order_fees: number;
+  buy_broker_fees: number;
+  buy_sales_taxes: number;
+  buy_scc_surcharge: number;
+  sell_order_fees: number;
+  sell_broker_fees: number;
+  sell_sales_taxes: number;
+  sell_scc_surcharge: number;
+  now_profit: number;
+  period_profit: number;
+  margin_percent: number;
+  roi_now: number;
+  roi_period: number;
+  capital_required: number;
+  shipping_cost: number;
+  target_demand_per_day: number;
+  target_historical_demand_per_day: number;
+  target_supply_units: number;
+  target_dos: number;
+  trade_score: number;
+}
+
+export interface ImportExportRouteAnalysis {
+  route: Omit<ImportExportRoute, "items">;
+  route_jumps: number;
+  item_count: number;
+  period_days: number;
+  rows: FlipResult[];
+  scenarios_by_type?: Record<string, ImportExportScenarioBrief[]>;
+}
 
 export interface ScanParams {
   system_name: string;

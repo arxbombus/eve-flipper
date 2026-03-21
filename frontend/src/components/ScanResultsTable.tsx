@@ -2,13 +2,21 @@ import {
   Fragment,
   memo,
   startTransition,
+  type ReactNode,
   useState,
   useMemo,
   useCallback,
   useEffect,
   useRef,
 } from "react";
-import type { FlipResult, StationCacheMeta, WatchlistItem, RouteState, SystemDanger } from "@/lib/types";
+import type {
+  FlipResult,
+  ImportExportScenarioBrief,
+  StationCacheMeta,
+  WatchlistItem,
+  RouteState,
+  SystemDanger,
+} from "@/lib/types";
 import { formatISK, formatMargin } from "@/lib/format";
 import { useI18n, type TranslationKey } from "@/lib/i18n";
 import {
@@ -40,6 +48,7 @@ const failedIconIds = new Set<number>();
 const CACHE_TTL_FALLBACK_MS = 20 * 60 * 1000;
 const COLUMN_PREFS_STORAGE_PREFIX = "eve-scan-columns:v1:";
 const ITEM_GROUPING_STORAGE_KEY = "eve-radius-group-by-item:v1";
+const SCC_SURCHARGE_PERCENT = 0.5;
 
 type SortKey = keyof FlipResult;
 type SortDir = "asc" | "desc";
@@ -85,6 +94,7 @@ interface Props {
   columnProfile?: "default" | "region_eveguru";
   isLoggedIn?: boolean;
   cargoLimit?: number;
+  detailScenariosByType?: Record<string, ImportExportScenarioBrief[]>;
 }
 
 type ColumnDef = {
@@ -341,6 +351,13 @@ const regionEveGuruColumnDefs: ColumnDef[] = [
     tooltipKey: "colTargetDemandDayHint",
   },
   {
+    key: "DayTargetHistoricalDemandPerDay",
+    labelKey: "colTargetHistoricalDemandDay",
+    width: "min-w-[135px]",
+    numeric: true,
+    tooltipKey: "colTargetHistoricalDemandDayHint",
+  },
+  {
     key: "DayTargetSupplyUnits",
     labelKey: "colTargetSupplyUnits",
     width: "min-w-[120px]",
@@ -423,6 +440,20 @@ const regionEveGuruColumnDefs: ColumnDef[] = [
     width: "min-w-[120px]",
     numeric: true,
     tooltipKey: "colCapitalRequiredHint",
+  },
+  {
+    key: "DayBuyOrderFees",
+    labelKey: "colBuyOrderFees",
+    width: "min-w-[120px]",
+    numeric: true,
+    tooltipKey: "colBuyOrderFeesHint",
+  },
+  {
+    key: "DaySellOrderFees",
+    labelKey: "colSellOrderFees",
+    width: "min-w-[120px]",
+    numeric: true,
+    tooltipKey: "colSellOrderFeesHint",
   },
   {
     key: "DayShippingCost",
@@ -735,12 +766,18 @@ function fmtCell(col: ColumnDef, row: FlipResult): string {
     col.key === "DayNowProfit" ||
     col.key === "DayPeriodProfit" ||
     col.key === "DayCapitalRequired" ||
+    col.key === "DayBuyOrderFees" ||
+    col.key === "DaySellOrderFees" ||
     col.key === "DayShippingCost"
   ) {
     return formatISK(Number(val ?? 0));
   }
   if (col.key === "DayROINow" || col.key === "DayROIPeriod") {
     return formatMargin(Number(val ?? 0));
+  }
+  if (col.key === "DayTargetDemandPerDay" || col.key === "DayTargetHistoricalDemandPerDay") {
+    const demand = Number(val);
+    return Number.isFinite(demand) ? demand.toFixed(2) : "\u2014";
   }
   if (col.key === "DaySecurity") {
     const sec = Number(val);
@@ -795,6 +832,7 @@ export function ScanResultsTable({
   columnProfile = "default",
   isLoggedIn = false,
   cargoLimit = 0,
+  detailScenariosByType,
 }: Props) {
   const { t } = useI18n();
   const emptyReason: EmptyReason = scanCompletedWithZero
@@ -3234,7 +3272,11 @@ export function ScanResultsTable({
       )}
 
       {dayDetailRow && (
-        <DayDetailPanel row={dayDetailRow} onClose={() => setDayDetailRow(null)} />
+        <DayDetailPanel
+          row={dayDetailRow}
+          scenarios={detailScenariosByType?.[String(dayDetailRow.TypeID)] ?? null}
+          onClose={() => setDayDetailRow(null)}
+        />
       )}
 
       <ExecutionPlannerPopup
@@ -3548,7 +3590,17 @@ function eveCategoryName(id: number): string {
 
 /* ─── Regional Day Trader detail panel (LMB on row) ─── */
 
-function DRRow({ label, value, accent, dim }: { label: string; value: string; accent?: boolean; dim?: boolean }) {
+function DRRow({
+  label,
+  value,
+  accent,
+  dim,
+}: {
+  label: string;
+  value: ReactNode;
+  accent?: boolean;
+  dim?: boolean;
+}) {
   return (
     <div className="flex items-center justify-between gap-2 text-xs">
       <span className="text-eve-dim">{label}</span>
@@ -3556,6 +3608,45 @@ function DRRow({ label, value, accent, dim }: { label: string; value: string; ac
     </div>
   );
 }
+
+function FeeValue({
+  total,
+  items,
+}: {
+  total: number;
+  items: { label: string; amount: number; percentLabel?: string; fixed?: boolean }[];
+}) {
+  if ((total ?? 0) <= 0) {
+    return <span>{formatISK(0)}</span>;
+  }
+  return (
+    <span className="relative inline-flex cursor-help flex-col items-end group">
+      <span>{formatISK(total)}</span>
+      <span className="pointer-events-none absolute right-0 top-full z-20 mt-1 hidden min-w-[180px] rounded-sm border border-eve-border bg-eve-panel px-2 py-1 text-left text-[10px] text-eve-text shadow-xl group-hover:block">
+        {items.map((item, index) => (
+          <span key={`${item.label}-${index}`} className={`flex items-center justify-between gap-3 ${index > 0 ? "mt-1" : ""}`}>
+            <span className="text-eve-dim">
+              {item.label}
+              {item.percentLabel ? ` (${item.percentLabel})` : ""}
+            </span>
+            <span>{formatISK(item.amount)}</span>
+          </span>
+        ))}
+        <span className="mt-1 flex items-center justify-between gap-3 border-t border-eve-border/60 pt-1 font-semibold">
+          <span className="text-eve-dim">Total</span>
+          <span>{formatISK(total)}</span>
+        </span>
+      </span>
+    </span>
+  );
+}
+
+type FeeBreakdownItem = {
+  label: string;
+  amount: number;
+  percentLabel?: string;
+  fixed?: boolean;
+};
 
 function calcConfidence(row: FlipResult): { score: number; label: string; color: string; hint: string } {
   const dos = row.DayTargetDOS ?? 0;
@@ -3580,10 +3671,20 @@ function calcConfidence(row: FlipResult): { score: number; label: string; color:
   return { score, label, color, hint };
 }
 
-function DayDetailPanel({ row, onClose }: { row: FlipResult; onClose: () => void }) {
+function DayDetailPanel({
+  row,
+  scenarios,
+  onClose,
+}: {
+  row: FlipResult;
+  scenarios: ImportExportScenarioBrief[] | null;
+  onClose: () => void;
+}) {
+  const [valueMode, setValueMode] = useState<"position" | "unit">("position");
   const signals: { label: string; title: string }[] = [];
   const dos = row.DayTargetDOS ?? 0;
   const demand = row.DayTargetDemandPerDay ?? 0;
+  const historyDemand = row.DayTargetHistoricalDemandPerDay ?? 0;
   if (dos > 90) signals.push({ label: "SAT", title: `Saturated: ${dos.toFixed(0)} days of supply` });
   if (demand > 0 && demand < 1) signals.push({ label: "LOW", title: `Low demand: ${demand.toFixed(2)} units/day` });
   const srcPrice = row.DaySourceAvgPrice ?? row.BuyPrice ?? 0;
@@ -3592,11 +3693,63 @@ function DayDetailPanel({ row, onClose }: { row: FlipResult; onClose: () => void
     signals.push({ label: "ODD", title: `Spread ${(((tgtNow - srcPrice) / srcPrice) * 100).toFixed(0)}% — verify prices` });
 
   const confidence = calcConfidence(row);
+  const sourceTotal = row.DaySourceTotal ?? row.DayCapitalRequired ?? 0;
+  const targetTotal = row.DayTargetTotal ?? row.DayTargetGross ?? 0;
+  const units = Math.max(1, row.UnitsToBuy ?? 1);
+  const amountForView = (value: number, divisor = units) =>
+    valueMode === "unit" && divisor > 0 ? value / divisor : value;
+  const fmtAmount = (value: number, divisor = units) => formatISK(amountForView(value, divisor));
+  const buyFeeItems: FeeBreakdownItem[] = [
+    {
+      label: "Broker",
+      amount: row.DayBuyBrokerFees ?? 0,
+      percentLabel:
+        (row.DayBuyOrderFees ?? 0) > 0 && (row.DayBuyBrokerFees ?? 0) > 0 && (row.DaySourceGross ?? 0) > 0
+          ? `${(((row.DayBuyBrokerFees ?? 0) / (row.DaySourceGross ?? 1)) * 100).toFixed(2)}%`
+          : undefined,
+    },
+    {
+      label: "Tax",
+      amount: row.DayBuySalesTaxes ?? 0,
+      percentLabel:
+        (row.DayBuySalesTaxes ?? 0) > 0 && (row.DaySourceGross ?? 0) > 0
+          ? `${(((row.DayBuySalesTaxes ?? 0) / (row.DaySourceGross ?? 1)) * 100).toFixed(2)}%`
+          : undefined,
+    },
+    {
+      label: "SCC",
+      amount: row.DayBuySCCSurcharge ?? 0,
+      percentLabel: `${SCC_SURCHARGE_PERCENT.toFixed(1)}%`,
+    },
+  ];
+  const sellFeeItems: FeeBreakdownItem[] = [
+    {
+      label: "Broker",
+      amount: row.DaySellBrokerFees ?? 0,
+      percentLabel:
+        (row.DaySellBrokerFees ?? 0) > 0 && (row.DayTargetGross ?? 0) > 0
+          ? `${(((row.DaySellBrokerFees ?? 0) / (row.DayTargetGross ?? 1)) * 100).toFixed(2)}%`
+          : undefined,
+    },
+    {
+      label: "Tax",
+      amount: row.DaySellSalesTaxes ?? 0,
+      percentLabel:
+        (row.DaySellSalesTaxes ?? 0) > 0 && (row.DayTargetGross ?? 0) > 0
+          ? `${(((row.DaySellSalesTaxes ?? 0) / (row.DayTargetGross ?? 1)) * 100).toFixed(2)}%`
+          : undefined,
+    },
+    {
+      label: "SCC",
+      amount: row.DaySellSCCSurcharge ?? 0,
+      percentLabel: `${SCC_SURCHARGE_PERCENT.toFixed(1)}%`,
+    },
+  ];
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60" onClick={onClose}>
       <div
-        className="bg-eve-panel border border-eve-border rounded-sm shadow-2xl w-full max-w-lg mx-4 font-mono text-xs text-eve-text"
+        className="bg-eve-panel border border-eve-border rounded-sm shadow-2xl w-full max-w-lg max-h-[85vh] mx-4 font-mono text-xs text-eve-text overflow-hidden"
         onClick={(e) => e.stopPropagation()}
       >
         <div className="flex items-center justify-between px-3 py-2 border-b border-eve-border bg-eve-dark/60">
@@ -3607,6 +3760,20 @@ function DayDetailPanel({ row, onClose }: { row: FlipResult; onClose: () => void
             )}
           </div>
           <div className="flex items-center gap-2 ml-3 shrink-0">
+            <div className="flex items-center rounded-sm border border-eve-border/70 overflow-hidden">
+              <button
+                onClick={() => setValueMode("position")}
+                className={`px-2 py-0.5 text-[10px] ${valueMode === "position" ? "bg-eve-accent/20 text-eve-accent" : "text-eve-dim hover:text-eve-text"}`}
+              >
+                Position
+              </button>
+              <button
+                onClick={() => setValueMode("unit")}
+                className={`px-2 py-0.5 text-[10px] border-l border-eve-border/70 ${valueMode === "unit" ? "bg-eve-accent/20 text-eve-accent" : "text-eve-dim hover:text-eve-text"}`}
+              >
+                Per Unit
+              </button>
+            </div>
             <span
               className={`px-1.5 py-0.5 rounded-sm border text-[10px] font-bold cursor-help ${confidence.color}`}
               title={confidence.hint}
@@ -3617,13 +3784,13 @@ function DayDetailPanel({ row, onClose }: { row: FlipResult; onClose: () => void
           </div>
         </div>
 
-        <div className="p-3 space-y-3">
+        <div className="p-3 space-y-3 overflow-y-auto max-h-[calc(85vh-41px)]">
           {signals.length > 0 && (
             <div className="flex flex-wrap gap-1.5">
               {signals.map((s, i) => (
                 <span key={i} title={s.title}
                   className="px-1.5 py-0.5 rounded-sm border border-yellow-500/60 text-yellow-400 bg-yellow-900/20 text-[10px] font-bold cursor-help">
-                  ⚠ {s.label}
+                  WARN {s.label}
                 </span>
               ))}
             </div>
@@ -3641,6 +3808,17 @@ function DayDetailPanel({ row, onClose }: { row: FlipResult; onClose: () => void
               <DRRow label="Price" value={formatISK(srcPrice)} />
               <DRRow label="Available" value={`${(row.SellOrderRemain ?? 0).toLocaleString()} units`} />
               <DRRow label="Region" value={row.BuyRegionName ?? "—"} />
+              <DRRow label="Gross" value={fmtAmount(row.DaySourceGross ?? sourceTotal)} />
+              <DRRow
+                label="Buy Order Fees"
+                value={
+                  <FeeValue
+                    total={amountForView(row.DayBuyOrderFees ?? 0)}
+                    items={buyFeeItems.map((item) => ({ ...item, amount: amountForView(item.amount) }))}
+                  />
+                }
+              />
+              <DRRow label="Source Total" value={fmtAmount(sourceTotal)} />
             </div>
             <div className="rounded-sm border border-eve-border/50 bg-eve-dark/30 p-2 space-y-1">
               <div className="text-[10px] uppercase tracking-wider text-eve-dim font-semibold mb-1">Target (Sell)</div>
@@ -3649,9 +3827,21 @@ function DayDetailPanel({ row, onClose }: { row: FlipResult; onClose: () => void
               {(row.DayTargetLowestSell ?? 0) > 0 && (
                 <DRRow label="Lowest ask" value={formatISK(row.DayTargetLowestSell ?? 0)} />
               )}
-              <DRRow label="Demand/Day" value={(demand).toFixed(2)} />
+              <DRRow label="Demand/Day (Blended)" value={demand.toFixed(2)} />
+              <DRRow label="Demand/Day (Historic)" value={historyDemand.toFixed(2)} />
               <DRRow label="Supply" value={(row.DayTargetSupplyUnits ?? 0).toLocaleString()} />
               <DRRow label="DOS" value={`${dos.toFixed(2)} days`} dim={dos > 30} />
+              <DRRow label="Gross" value={fmtAmount(row.DayTargetGross ?? targetTotal)} />
+              <DRRow
+                label="Sell Order Fees"
+                value={
+                  <FeeValue
+                    total={amountForView(row.DaySellOrderFees ?? 0)}
+                    items={sellFeeItems.map((item) => ({ ...item, amount: amountForView(item.amount) }))}
+                  />
+                }
+              />
+              <DRRow label="Target Total" value={fmtAmount(targetTotal)} />
             </div>
           </div>
 
@@ -3660,15 +3850,156 @@ function DayDetailPanel({ row, onClose }: { row: FlipResult; onClose: () => void
               Position ({(row.UnitsToBuy ?? 0).toLocaleString()} units · {(row.Volume ?? 0).toFixed(2)} m³/unit)
             </div>
             <div className="grid grid-cols-2 gap-x-4">
-              <DRRow label="Capital" value={formatISK(row.DayCapitalRequired ?? 0)} />
-              <DRRow label="Shipping" value={formatISK(row.DayShippingCost ?? 0)} />
-              <DRRow label="Now Profit" value={formatISK(row.DayNowProfit ?? row.TotalProfit ?? 0)} accent={(row.DayNowProfit ?? 0) > 0} />
-              <DRRow label="Period Profit" value={formatISK(row.DayPeriodProfit ?? row.RealProfit ?? 0)} accent={(row.DayPeriodProfit ?? 0) > 0} />
+              <DRRow label="Capital" value={fmtAmount(row.DayCapitalRequired ?? 0)} />
+              <DRRow
+                label="Buy Order Fees"
+                value={
+                  <FeeValue
+                    total={amountForView(row.DayBuyOrderFees ?? 0)}
+                    items={buyFeeItems.map((item) => ({ ...item, amount: amountForView(item.amount) }))}
+                  />
+                }
+              />
+              <DRRow
+                label="Sell Order Fees"
+                value={
+                  <FeeValue
+                    total={amountForView(row.DaySellOrderFees ?? 0)}
+                    items={sellFeeItems.map((item) => ({ ...item, amount: amountForView(item.amount) }))}
+                  />
+                }
+              />
+              <DRRow label="Shipping" value={fmtAmount(row.DayShippingCost ?? 0)} />
+              <DRRow label="Now Profit" value={fmtAmount(row.DayNowProfit ?? row.TotalProfit ?? 0)} accent={(row.DayNowProfit ?? 0) > 0} />
+              <DRRow label="Period Profit" value={fmtAmount(row.DayPeriodProfit ?? row.RealProfit ?? 0)} accent={(row.DayPeriodProfit ?? 0) > 0} />
               <DRRow label="ROI Now" value={formatMargin(row.DayROINow ?? 0)} accent={(row.DayROINow ?? 0) > 0} />
               <DRRow label="ROI Period" value={formatMargin(row.DayROIPeriod ?? 0)} accent={(row.DayROIPeriod ?? 0) > 0} />
               <DRRow label="Margin" value={formatMargin(row.MarginPercent ?? 0)} />
             </div>
           </div>
+
+          {scenarios && scenarios.length > 0 && (
+            <div className="rounded-sm border border-eve-border/50 bg-eve-dark/30 p-2 space-y-2">
+              <div className="text-[10px] uppercase tracking-wider text-eve-dim font-semibold">
+                Scenarios
+              </div>
+              <div className="space-y-2">
+                {scenarios.map((scenario) => (
+                  <div key={scenario.key} className="rounded-sm border border-eve-border/40 bg-black/10 p-2">
+                    <div className="flex items-center justify-between gap-3">
+                      <div className="text-[11px] font-semibold text-eve-text">{scenario.label}</div>
+                      <div className="text-[10px] text-eve-dim">
+                        {(scenario.purchase_units ?? 0).toLocaleString()} units
+                      </div>
+                    </div>
+                    <div className="mt-2 grid grid-cols-2 gap-x-4 gap-y-1">
+                      {(() => {
+                        const scenarioUnits = Math.max(1, scenario.purchase_units ?? 1);
+                        const scenarioAmount = (value: number) =>
+                          valueMode === "unit" && scenarioUnits > 0 ? value / scenarioUnits : value;
+                        const scenarioBuyFeeItems: FeeBreakdownItem[] = [
+                          {
+                            label: scenario.key === "buy_order_sell_order_structure" ? "Broker (min 100 ISK)" : "Broker",
+                            amount: scenario.buy_broker_fees ?? 0,
+                            fixed: scenario.key === "buy_order_sell_order_structure",
+                            percentLabel:
+                              scenario.key === "buy_order_sell_order_structure"
+                                ? undefined
+                                : (scenario.buy_broker_fees ?? 0) > 0 && (scenario.source_gross ?? 0) > 0
+                                  ? `${(((scenario.buy_broker_fees ?? 0) / (scenario.source_gross ?? 1)) * 100).toFixed(2)}%`
+                                  : undefined,
+                          },
+                          {
+                            label: "Tax",
+                            amount: scenario.buy_sales_taxes ?? 0,
+                            percentLabel:
+                              (scenario.buy_sales_taxes ?? 0) > 0 && (scenario.source_gross ?? 0) > 0
+                                ? `${(((scenario.buy_sales_taxes ?? 0) / (scenario.source_gross ?? 1)) * 100).toFixed(2)}%`
+                                : undefined,
+                          },
+                          {
+                            label: "SCC",
+                            amount: scenario.buy_scc_surcharge ?? 0,
+                            percentLabel: `${SCC_SURCHARGE_PERCENT.toFixed(1)}%`,
+                          },
+                        ];
+                        const scenarioSellFeeItems: FeeBreakdownItem[] = [
+                          {
+                            label: "Broker",
+                            amount: scenario.sell_broker_fees ?? 0,
+                            percentLabel:
+                              (scenario.sell_broker_fees ?? 0) > 0 && (scenario.target_gross ?? 0) > 0
+                                ? `${(((scenario.sell_broker_fees ?? 0) / (scenario.target_gross ?? 1)) * 100).toFixed(2)}%`
+                                : undefined,
+                          },
+                          {
+                            label: "Tax",
+                            amount: scenario.sell_sales_taxes ?? 0,
+                            percentLabel:
+                              (scenario.sell_sales_taxes ?? 0) > 0 && (scenario.target_gross ?? 0) > 0
+                                ? `${(((scenario.sell_sales_taxes ?? 0) / (scenario.target_gross ?? 1)) * 100).toFixed(2)}%`
+                                : undefined,
+                          },
+                          {
+                            label: "SCC",
+                            amount: scenario.sell_scc_surcharge ?? 0,
+                            percentLabel: `${SCC_SURCHARGE_PERCENT.toFixed(1)}%`,
+                          },
+                        ];
+                        return (
+                          <>
+                      <DRRow label="Source" value={formatISK(scenario.source_price ?? 0)} />
+                      <DRRow label="Source Gross" value={formatISK(scenarioAmount(scenario.source_gross ?? 0))} />
+                      <DRRow label="Source Total" value={formatISK(scenarioAmount(scenario.source_total ?? 0))} />
+                      <DRRow label="Target" value={formatISK(scenario.target_now_price ?? 0)} />
+                      <DRRow label="Target Avg" value={formatISK(scenario.target_period_price ?? 0)} />
+                      <DRRow label="Target Gross" value={formatISK(scenarioAmount(scenario.target_gross ?? 0))} />
+                      <DRRow label="Target Total" value={formatISK(scenarioAmount(scenario.target_total ?? 0))} />
+                      <DRRow
+                        label="Buy Order Fees"
+                        value={
+                          <FeeValue
+                            total={scenarioAmount(scenario.buy_order_fees ?? 0)}
+                            items={scenarioBuyFeeItems.map((item) => ({
+                              ...item,
+                              amount: item.fixed ? item.amount : scenarioAmount(item.amount),
+                            }))}
+                          />
+                        }
+                      />
+                      <DRRow
+                        label="Sell Order Fees"
+                        value={
+                          <FeeValue
+                            total={scenarioAmount(scenario.sell_order_fees ?? 0)}
+                            items={scenarioSellFeeItems.map((item) => ({
+                              ...item,
+                              amount: item.fixed ? item.amount : scenarioAmount(item.amount),
+                            }))}
+                          />
+                        }
+                      />
+                      <DRRow label="Shipping" value={formatISK(scenarioAmount(scenario.shipping_cost ?? 0))} />
+                      <DRRow label="Now Profit" value={formatISK(scenarioAmount(scenario.now_profit ?? 0))} accent={(scenario.now_profit ?? 0) > 0} />
+                      <DRRow label="Period Profit" value={formatISK(scenarioAmount(scenario.period_profit ?? 0))} accent={(scenario.period_profit ?? 0) > 0} />
+                      <DRRow label="Margin" value={formatMargin(scenario.margin_percent ?? 0)} />
+                      <DRRow label="ROI" value={formatMargin(scenario.roi_now ?? 0)} accent={(scenario.roi_now ?? 0) > 0} />
+                      <DRRow label="ROI Avg" value={formatMargin(scenario.roi_period ?? 0)} accent={(scenario.roi_period ?? 0) > 0} />
+                      <DRRow label="Capital" value={formatISK(scenarioAmount(scenario.capital_required ?? 0))} />
+                      <DRRow label="Demand/Day (Blended)" value={(scenario.target_demand_per_day ?? 0).toFixed(2)} />
+                      <DRRow label="Demand/Day (Historic)" value={(scenario.target_historical_demand_per_day ?? 0).toFixed(2)} />
+                      <DRRow label="Supply" value={(scenario.target_supply_units ?? 0).toLocaleString()} />
+                      <DRRow label="DOS" value={`${(scenario.target_dos ?? 0).toFixed(2)} days`} />
+                      <DRRow label="Score" value={(scenario.trade_score ?? 0).toFixed(0)} />
+                          </>
+                        );
+                      })()}
+                    </div>
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
 
           {((row.DayAssets ?? 0) > 0 || (row.DayActiveOrders ?? 0) > 0) && (
             <div className="rounded-sm border border-eve-border/50 bg-eve-dark/30 p-2 space-y-1">

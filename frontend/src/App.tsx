@@ -11,6 +11,7 @@ import { StationTrading } from "./components/StationTrading";
 import { IndustryTab } from "./components/IndustryTab";
 import { WarTracker } from "./components/WarTracker";
 import { PlexTab } from "./components/PlexTab";
+import { ImportExportTab } from "./components/ImportExportTab";
 // import { MarketMakingTab } from "./components/MarketMakingTab";
 import { ScanHistory } from "./components/ScanHistory";
 import { CommandPalette } from "./components/CommandPalette";
@@ -56,6 +57,7 @@ type Tab =
   | "contracts"
   | "station"
   | "route"
+  | "import-export"
   | "industry"
   | "demand"
   | "plex";
@@ -354,6 +356,7 @@ function App() {
           "contracts",
           "station",
           "route",
+          "import-export",
           "industry",
           "demand",
           "plex",
@@ -534,6 +537,12 @@ function App() {
         modifiers: ["alt"] as const,
         handler: () => setTab("route"),
         description: "Switch to Route tab",
+      },
+      {
+        key: "6",
+        modifiers: ["alt"] as const,
+        handler: () => setTab("import-export"),
+        description: "Switch to Import/Export tab",
       },
       {
         key: "w",
@@ -1660,6 +1669,11 @@ function App() {
                 onClick={() => setTab("route")}
                 label={t("tabRoute")}
               />
+              <TabButton
+                active={tab === "import-export"}
+                onClick={() => setTab("import-export")}
+                label={t("tabImportExport") || "Import / Export"}
+              />
               {/* Visual separator: scan group vs station/industry */}
               <div
                 className="h-6 w-px bg-eve-border mx-1 flex-shrink-0"
@@ -1690,6 +1704,7 @@ function App() {
           </div>
 
           {tab !== "route" &&
+            tab !== "import-export" &&
             tab !== "station" &&
             tab !== "industry" &&
             tab !== "demand" &&
@@ -1870,6 +1885,11 @@ function App() {
               loadedResults={routeLoadedResults}
               isLoggedIn={authStatus.logged_in}
             />
+          </div>
+          <div
+            className={`flex-1 min-h-0 flex flex-col ${tab === "import-export" ? "" : "hidden"}`}
+          >
+            <ImportExportTab isLoggedIn={authStatus.logged_in} />
           </div>
           <div
             className={`flex-1 min-h-0 flex flex-col ${tab === "industry" ? "" : "hidden"}`}
