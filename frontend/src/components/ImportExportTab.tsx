@@ -32,6 +32,7 @@ import {
   SettingsSelect,
   TabSettingsPanel,
 } from "./TabSettingsPanel";
+import { cn } from "@/lib/utils"
 
 const SKILL_ACCOUNTING = 16622;
 const SKILL_BROKER_RELATIONS = 3446;
@@ -597,24 +598,26 @@ export function ImportExportTab({ isLoggedIn }: Props) {
                 New
               </button>
             )}
-            {sidebarCollapsed && (
+            <div className={cn(sidebarCollapsed ? "flex-col" : "flex-row")}>
               <button
                 type="button"
-                onClick={openCreateModal}
-                className="w-8 h-8 rounded-sm border border-eve-accent/40 text-eve-accent hover:bg-eve-accent/15"
-                title="Create route"
+                onClick={() => persistSidebar(!sidebarCollapsed)}
+                className="w-8 h-8 rounded-sm border border-eve-border text-eve-dim hover:text-eve-accent hover:border-eve-accent/40"
+                title={sidebarCollapsed ? "Expand routes" : "Collapse routes"}
               >
-                +
+                {sidebarCollapsed ? "»" : "«"}
               </button>
-            )}
-            <button
-              type="button"
-              onClick={() => persistSidebar(!sidebarCollapsed)}
-              className="w-8 h-8 rounded-sm border border-eve-border text-eve-dim hover:text-eve-accent hover:border-eve-accent/40"
-              title={sidebarCollapsed ? "Expand routes" : "Collapse routes"}
-            >
-              {sidebarCollapsed ? "»" : "«"}
-            </button>
+              {sidebarCollapsed && (
+                <button
+                  type="button"
+                  onClick={openCreateModal}
+                  className="w-8 h-8 mt-2 rounded-sm border border-eve-accent/40 text-eve-accent hover:bg-eve-accent/15"
+                  title="Create route"
+                >
+                  +
+                </button>
+              )}
+            </div>
           </div>
         </div>
 
