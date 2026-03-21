@@ -180,8 +180,9 @@ export function CharacterPopup({
     return d.toLocaleDateString() + " " + d.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
   };
 
-  const buyOrders = data?.orders.filter((o) => o.is_buy_order) ?? [];
-  const sellOrders = data?.orders.filter((o) => !o.is_buy_order) ?? [];
+  const orders = data?.orders ?? [];
+  const buyOrders = orders.filter((o) => o.is_buy_order);
+  const sellOrders = orders.filter((o) => !o.is_buy_order);
   const totalBuyValue = buyOrders.reduce((sum, o) => sum + o.price * o.volume_remain, 0);
   const totalSellValue = sellOrders.reduce((sum, o) => sum + o.price * o.volume_remain, 0);
 
@@ -372,5 +373,4 @@ export function CharacterPopup({
     </Modal>
   );
 }
-
 

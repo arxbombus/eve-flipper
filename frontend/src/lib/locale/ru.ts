@@ -129,6 +129,8 @@ export const ru = {
 
     // Table
     colItem: "Предмет",
+    colCategory: "Категория",
+    colGroup: "Группа",
     colType: "Тип",
     colBuyPrice: "Лучший Ask (L1)",
     colExpectedBuyPrice: "Ср. цена покупки",

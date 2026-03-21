@@ -60,7 +60,6 @@ frontend/tsconfig.tsbuildinfo
 
 # Claude settings
 .claude/
-.serena/
 
 # IDE / editor
 .vscode/

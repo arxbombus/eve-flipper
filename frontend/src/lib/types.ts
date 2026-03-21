@@ -435,6 +435,7 @@ export interface ImportExportRouteItem {
   category_id: number;
   group_id: number;
   group_name: string;
+  custom_purchase_demand_days: number | null;
   added_at: string;
 }
 
@@ -503,6 +504,116 @@ export interface ImportExportRouteAnalysis {
   period_days: number;
   rows: FlipResult[];
   scenarios_by_type?: Record<string, ImportExportScenarioBrief[]>;
+}
+
+export interface ImportExportWarehouse {
+  id: number;
+  name: string;
+  system_id: number;
+  system_name: string;
+  location_id: number;
+  location_name: string;
+  is_structure: boolean;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface ImportExportTransitItem {
+  type_id: number;
+  type_name: string;
+  quantity: number;
+}
+
+export interface ImportExportTransitEntry {
+  id: number;
+  from_system_id: number;
+  from_system_name: string;
+  from_location_id: number;
+  from_location_name: string;
+  to_system_id: number;
+  to_system_name: string;
+  to_location_id: number;
+  to_location_name: string;
+  items: ImportExportTransitItem[];
+  created_at: string;
+  updated_at: string;
+}
+
+export interface ImportExportRestockingWarehouseItem {
+  type_id: number;
+  type_name: string;
+  quantity: number;
+  has_stock: boolean;
+  route_refs: number;
+}
+
+export interface ImportExportRestockingWarehouse extends ImportExportWarehouse {
+  items: ImportExportRestockingWarehouseItem[];
+}
+
+export interface ImportExportRestockingOrder {
+  character_id: number;
+  character_name: string;
+  order_id: number;
+  type_id: number;
+  type_name: string;
+  location_id: number;
+  location_name: string;
+  region_id: number;
+  price: number;
+  volume_remain: number;
+  volume_total: number;
+  is_buy_order: boolean;
+  issued: string;
+}
+
+export interface ImportExportRestockingItemSummary {
+  route_breakdowns: ImportExportRestockingRouteBreakdown[];
+  suggested_buy_qty: number;
+  suggested_move_qty: number;
+  type_id: number;
+  type_name: string;
+  route_refs: number;
+  target_stock: number;
+  warehouse_stock: number;
+  transit_stock: number;
+  buy_order_qty: number;
+  sell_order_qty: number;
+  net_available: number;
+  restock_needed: number;
+  aggregated_demand_per_day: number;
+  effective_demand_days_average: number;
+}
+
+export interface ImportExportRestockingRouteBreakdown {
+  allocated_shared_supply: number;
+  transfer_suggestions: ImportExportRestockingTransferSuggestion[];
+  route_id: number;
+  route_name: string;
+  target_system_name: string;
+  target_location_name: string;
+  target_stock: number;
+  demand_per_day: number;
+  effective_demand_days: number;
+  destination_stock: number;
+  destination_sell_qty: number;
+  route_deficit: number;
+  suggested_haul_qty: number;
+  suggested_buy_qty: number;
+}
+
+export interface ImportExportRestockingTransferSuggestion {
+  warehouse_id: number;
+  warehouse_name: string;
+  location_name: string;
+  quantity: number;
+}
+
+export interface ImportExportRestockingOverview {
+  warehouses: ImportExportRestockingWarehouse[];
+  orders: ImportExportRestockingOrder[];
+  transit: ImportExportTransitEntry[];
+  items: ImportExportRestockingItemSummary[];
 }
 
 export interface ScanParams {

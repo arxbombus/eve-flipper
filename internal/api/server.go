@@ -726,8 +726,16 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("PUT /api/import-export/routes/{id}", s.handleUpdateImportExportRoute)
 	mux.HandleFunc("DELETE /api/import-export/routes/{id}", s.handleDeleteImportExportRoute)
 	mux.HandleFunc("POST /api/import-export/routes/{id}/items", s.handleAddImportExportRouteItem)
+	mux.HandleFunc("PUT /api/import-export/routes/{id}/items/{itemID}", s.handleUpdateImportExportRouteItem)
 	mux.HandleFunc("DELETE /api/import-export/routes/{id}/items/{itemID}", s.handleDeleteImportExportRouteItem)
 	mux.HandleFunc("GET /api/import-export/routes/{id}/analysis", s.handleAnalyzeImportExportRoute)
+	mux.HandleFunc("GET /api/import-export/warehouses", s.handleGetImportExportWarehouses)
+	mux.HandleFunc("POST /api/import-export/warehouses", s.handleCreateImportExportWarehouse)
+	mux.HandleFunc("DELETE /api/import-export/warehouses/{warehouseID}", s.handleDeleteImportExportWarehouse)
+	mux.HandleFunc("GET /api/import-export/transit", s.handleGetImportExportTransitEntries)
+	mux.HandleFunc("POST /api/import-export/transit", s.handleCreateImportExportTransitEntry)
+	mux.HandleFunc("DELETE /api/import-export/transit/{entryID}", s.handleDeleteImportExportTransitEntry)
+	mux.HandleFunc("GET /api/import-export/restocking/overview", s.handleGetImportExportRestockingOverview)
 	mux.HandleFunc("GET /api/watchlist", s.handleGetWatchlist)
 	mux.HandleFunc("POST /api/watchlist", s.handleAddWatchlist)
 	mux.HandleFunc("DELETE /api/watchlist/{typeID}", s.handleDeleteWatchlist)
@@ -2245,16 +2253,44 @@ type importExportRouteRequest struct {
 }
 
 type importExportRouteItemRequest struct {
-	TypeID     int32  `json:"type_id"`
-	TypeName   string `json:"type_name"`
-	CategoryID int32  `json:"category_id"`
-	GroupID    int32  `json:"group_id"`
-	GroupName  string `json:"group_name"`
+	TypeID                   int32    `json:"type_id"`
+	TypeName                 string   `json:"type_name"`
+	CategoryID               int32    `json:"category_id"`
+	GroupID                  int32    `json:"group_id"`
+	GroupName                string   `json:"group_name"`
+	CustomPurchaseDemandDays *float64 `json:"custom_purchase_demand_days"`
 }
 
 type importExportRouteResponse struct {
 	config.ImportExportRoute
 	Items []config.ImportExportRouteItem `json:"items"`
+}
+
+type importExportWarehouseRequest struct {
+	Name         string `json:"name"`
+	SystemID     int32  `json:"system_id"`
+	SystemName   string `json:"system_name"`
+	LocationID   int64  `json:"location_id"`
+	LocationName string `json:"location_name"`
+	IsStructure  bool   `json:"is_structure"`
+}
+
+type importExportTransitEntryRequest struct {
+	FromSystemID     int32                             `json:"from_system_id"`
+	FromSystemName   string                            `json:"from_system_name"`
+	FromLocationID   int64  `json:"from_location_id"`
+	FromLocationName string `json:"from_location_name"`
+	ToSystemID       int32                             `json:"to_system_id"`
+	ToSystemName     string                            `json:"to_system_name"`
+	ToLocationID     int64  `json:"to_location_id"`
+	ToLocationName   string `json:"to_location_name"`
+	Items            []importExportTransitItemRequest `json:"items"`
+}
+
+type importExportTransitItemRequest struct {
+	TypeID   int32  `json:"type_id"`
+	TypeName string `json:"type_name"`
+	Quantity int64  `json:"quantity"`
 }
 
 func (s *Server) parseImportExportRoute(req importExportRouteRequest) (config.ImportExportRoute, error) {
@@ -2400,12 +2436,38 @@ func (s *Server) handleAddImportExportRouteItem(w http.ResponseWriter, r *http.R
 		return
 	}
 	item, err := s.db.AddImportExportRouteItemForUser(userID, routeID, config.ImportExportRouteItem{
-		TypeID:     req.TypeID,
-		TypeName:   strings.TrimSpace(req.TypeName),
-		CategoryID: req.CategoryID,
-		GroupID:    req.GroupID,
-		GroupName:  strings.TrimSpace(req.GroupName),
+		TypeID:                   req.TypeID,
+		TypeName:                 strings.TrimSpace(req.TypeName),
+		CategoryID:               req.CategoryID,
+		GroupID:                  req.GroupID,
+		GroupName:                strings.TrimSpace(req.GroupName),
+		CustomPurchaseDemandDays: req.CustomPurchaseDemandDays,
 	})
+	if err != nil {
+		writeError(w, 400, err.Error())
+		return
+	}
+	writeJSON(w, item)
+}
+
+func (s *Server) handleUpdateImportExportRouteItem(w http.ResponseWriter, r *http.Request) {
+	userID := userIDFromRequest(r)
+	routeID, err := strconv.ParseInt(r.PathValue("id"), 10, 64)
+	if err != nil || routeID <= 0 {
+		writeError(w, 400, "invalid route id")
+		return
+	}
+	itemID, err := strconv.ParseInt(r.PathValue("itemID"), 10, 64)
+	if err != nil || itemID <= 0 {
+		writeError(w, 400, "invalid item id")
+		return
+	}
+	var req importExportRouteItemRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, 400, "invalid json")
+		return
+	}
+	item, err := s.db.UpdateImportExportRouteItemForUser(userID, routeID, itemID, req.CustomPurchaseDemandDays)
 	if err != nil {
 		writeError(w, 400, err.Error())
 		return
@@ -2466,6 +2528,109 @@ func (s *Server) handleAnalyzeImportExportRoute(w http.ResponseWriter, r *http.R
 		return
 	}
 	writeJSON(w, analysis)
+}
+
+func (s *Server) handleGetImportExportWarehouses(w http.ResponseWriter, r *http.Request) {
+	userID := userIDFromRequest(r)
+	warehouses, err := s.db.ListImportExportWarehousesForUser(userID)
+	if err != nil {
+		writeError(w, 500, err.Error())
+		return
+	}
+	writeJSON(w, warehouses)
+}
+
+func (s *Server) handleCreateImportExportWarehouse(w http.ResponseWriter, r *http.Request) {
+	userID := userIDFromRequest(r)
+	var req importExportWarehouseRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, 400, "invalid json")
+		return
+	}
+	warehouse, err := s.db.CreateImportExportWarehouseForUser(userID, config.ImportExportWarehouse{
+		Name:         req.Name,
+		SystemID:     req.SystemID,
+		SystemName:   strings.TrimSpace(req.SystemName),
+		LocationID:   req.LocationID,
+		LocationName: strings.TrimSpace(req.LocationName),
+		IsStructure:  req.IsStructure,
+	})
+	if err != nil {
+		writeError(w, 400, err.Error())
+		return
+	}
+	writeJSON(w, warehouse)
+}
+
+func (s *Server) handleDeleteImportExportWarehouse(w http.ResponseWriter, r *http.Request) {
+	userID := userIDFromRequest(r)
+	warehouseID, err := strconv.ParseInt(r.PathValue("warehouseID"), 10, 64)
+	if err != nil || warehouseID <= 0 {
+		writeError(w, 400, "invalid warehouse id")
+		return
+	}
+	if err := s.db.DeleteImportExportWarehouseForUser(userID, warehouseID); err != nil {
+		writeError(w, 500, err.Error())
+		return
+	}
+	writeJSON(w, map[string]bool{"ok": true})
+}
+
+func (s *Server) handleGetImportExportTransitEntries(w http.ResponseWriter, r *http.Request) {
+	userID := userIDFromRequest(r)
+	entries, err := s.db.ListImportExportTransitEntriesForUser(userID)
+	if err != nil {
+		writeError(w, 500, err.Error())
+		return
+	}
+	writeJSON(w, entries)
+}
+
+func (s *Server) handleCreateImportExportTransitEntry(w http.ResponseWriter, r *http.Request) {
+	userID := userIDFromRequest(r)
+	var req importExportTransitEntryRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, 400, "invalid json")
+		return
+	}
+	items := make([]config.ImportExportTransitItem, 0, len(req.Items))
+	for _, item := range req.Items {
+		items = append(items, config.ImportExportTransitItem{
+			TypeID:   item.TypeID,
+			TypeName: strings.TrimSpace(item.TypeName),
+			Quantity: item.Quantity,
+		})
+	}
+	entry, err := s.db.CreateImportExportTransitEntryForUser(userID, config.ImportExportTransitEntry{
+		FromSystemID:     req.FromSystemID,
+		FromSystemName:   strings.TrimSpace(req.FromSystemName),
+		FromLocationID:   req.FromLocationID,
+		FromLocationName: strings.TrimSpace(req.FromLocationName),
+		ToSystemID:       req.ToSystemID,
+		ToSystemName:     strings.TrimSpace(req.ToSystemName),
+		ToLocationID:     req.ToLocationID,
+		ToLocationName:   strings.TrimSpace(req.ToLocationName),
+		Items:            items,
+	})
+	if err != nil {
+		writeError(w, 400, err.Error())
+		return
+	}
+	writeJSON(w, entry)
+}
+
+func (s *Server) handleDeleteImportExportTransitEntry(w http.ResponseWriter, r *http.Request) {
+	userID := userIDFromRequest(r)
+	entryID, err := strconv.ParseInt(r.PathValue("entryID"), 10, 64)
+	if err != nil || entryID <= 0 {
+		writeError(w, 400, "invalid transit entry id")
+		return
+	}
+	if err := s.db.DeleteImportExportTransitEntryForUser(userID, entryID); err != nil {
+		writeError(w, 500, err.Error())
+		return
+	}
+	writeJSON(w, map[string]bool{"ok": true})
 }
 
 func (s *Server) parseScanParams(req scanRequest) (engine.ScanParams, error) {

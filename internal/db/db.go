@@ -1250,12 +1250,57 @@ func (d *DB) migrate() error {
 				category_id   INTEGER NOT NULL DEFAULT 0,
 				group_id      INTEGER NOT NULL DEFAULT 0,
 				group_name    TEXT NOT NULL DEFAULT '',
+				custom_purchase_demand_days REAL,
 				added_at      TEXT NOT NULL
 			);
 			CREATE INDEX IF NOT EXISTS idx_import_export_route_items_route_added
 				ON import_export_route_items(route_id, added_at DESC);
 			CREATE UNIQUE INDEX IF NOT EXISTS idx_import_export_route_items_unique
 				ON import_export_route_items(route_id, type_id);
+
+			CREATE TABLE IF NOT EXISTS import_export_warehouses (
+				id            INTEGER PRIMARY KEY AUTOINCREMENT,
+				user_id       TEXT NOT NULL,
+				name          TEXT NOT NULL,
+				system_id     INTEGER NOT NULL,
+				system_name   TEXT NOT NULL,
+				location_id   INTEGER NOT NULL,
+				location_name TEXT NOT NULL,
+				is_structure  INTEGER NOT NULL DEFAULT 0,
+				created_at    TEXT NOT NULL,
+				updated_at    TEXT NOT NULL
+			);
+			CREATE INDEX IF NOT EXISTS idx_import_export_warehouses_user_updated
+				ON import_export_warehouses(user_id, updated_at DESC);
+			CREATE UNIQUE INDEX IF NOT EXISTS idx_import_export_warehouses_user_location
+				ON import_export_warehouses(user_id, location_id);
+
+			CREATE TABLE IF NOT EXISTS import_export_transit_entries (
+				id                 INTEGER PRIMARY KEY AUTOINCREMENT,
+				user_id            TEXT NOT NULL,
+				from_system_id     INTEGER NOT NULL DEFAULT 0,
+				from_system_name   TEXT NOT NULL DEFAULT '',
+				from_location_id   INTEGER NOT NULL DEFAULT 0,
+				from_location_name TEXT NOT NULL DEFAULT '',
+				to_system_id       INTEGER NOT NULL DEFAULT 0,
+				to_system_name     TEXT NOT NULL DEFAULT '',
+				to_location_id     INTEGER NOT NULL DEFAULT 0,
+				to_location_name   TEXT NOT NULL DEFAULT '',
+				created_at         TEXT NOT NULL,
+				updated_at         TEXT NOT NULL
+			);
+			CREATE INDEX IF NOT EXISTS idx_import_export_transit_entries_user_updated
+				ON import_export_transit_entries(user_id, updated_at DESC);
+
+			CREATE TABLE IF NOT EXISTS import_export_transit_entry_items (
+				id         INTEGER PRIMARY KEY AUTOINCREMENT,
+				entry_id    INTEGER NOT NULL REFERENCES import_export_transit_entries(id) ON DELETE CASCADE,
+				type_id     INTEGER NOT NULL,
+				type_name   TEXT NOT NULL,
+				quantity    INTEGER NOT NULL
+			);
+			CREATE INDEX IF NOT EXISTS idx_import_export_transit_entry_items_entry
+				ON import_export_transit_entry_items(entry_id, id);
 
 			INSERT OR IGNORE INTO schema_version (version) VALUES (28);
 		`)
@@ -1264,7 +1309,6 @@ func (d *DB) migrate() error {
 		}
 		logger.Info("DB", "Applied migration v28 (import/export routes)")
 	}
-
 	return nil
 }
 

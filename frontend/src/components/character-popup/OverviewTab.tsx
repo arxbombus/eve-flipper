@@ -34,6 +34,9 @@ export function OverviewTab({
   corpRolesLoading,
   t,
 }: OverviewTabProps) {
+  const orders = data.orders ?? [];
+  const transactions = data.transactions ?? [];
+
   // Net worth = wallet + sell orders value.
   // Wallet balance already accounts for ISK locked in buy order escrow,
   // so adding buy value again would double-count.
@@ -75,7 +78,7 @@ export function OverviewTab({
       <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
         <StatCard label={t("charBuyOrders")} value={String(buyOrders.length)} subvalue={`${formatIsk(totalBuyValue)} ISK`} />
         <StatCard label={t("charSellOrders")} value={String(sellOrders.length)} subvalue={`${formatIsk(totalSellValue)} ISK`} />
-        <StatCard label={t("charTotalOrders")} value={String(data.orders.length)} subvalue={`${formatIsk(totalBuyValue + totalSellValue)} ISK`} />
+        <StatCard label={t("charTotalOrders")} value={String(orders.length)} subvalue={`${formatIsk(totalBuyValue + totalSellValue)} ISK`} />
         <StatCard
           label={t("charTradingProfit")}
           value={`${tradingProfit >= 0 ? "+" : ""}${formatIsk(tradingProfit)} ISK`}
@@ -85,8 +88,8 @@ export function OverviewTab({
 
       {/* Recent Activity */}
       <div className="grid grid-cols-2 gap-3">
-        <StatCard label={t("charRecentBuys")} value={`${formatIsk(totalBought)} ISK`} subvalue={`${data.transactions?.filter((t) => t.is_buy).length ?? 0} ${t("charTxns")}`} />
-        <StatCard label={t("charRecentSales")} value={`${formatIsk(totalSold)} ISK`} subvalue={`${data.transactions?.filter((t) => !t.is_buy).length ?? 0} ${t("charTxns")}`} />
+        <StatCard label={t("charRecentBuys")} value={`${formatIsk(totalBought)} ISK`} subvalue={`${transactions.filter((t) => t.is_buy).length} ${t("charTxns")}`} />
+        <StatCard label={t("charRecentSales")} value={`${formatIsk(totalSold)} ISK`} subvalue={`${transactions.filter((t) => !t.is_buy).length} ${t("charTxns")}`} />
       </div>
 
       {/* Corp Dashboard Section */}

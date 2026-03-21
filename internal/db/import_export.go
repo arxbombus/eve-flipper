@@ -1,6 +1,7 @@
 package db
 
 import (
+	"database/sql"
 	"errors"
 	"strings"
 	"time"
@@ -68,6 +69,36 @@ func scanImportExportRoute(scanner rowScanner) (config.ImportExportRoute, error)
 		&route.UpdatedAt,
 	)
 	return route, err
+}
+
+func normalizeImportExportRouteItem(item config.ImportExportRouteItem) config.ImportExportRouteItem {
+	item.TypeName = strings.TrimSpace(item.TypeName)
+	item.GroupName = strings.TrimSpace(item.GroupName)
+	if item.CustomPurchaseDemandDays != nil && *item.CustomPurchaseDemandDays <= 0 {
+		item.CustomPurchaseDemandDays = nil
+	}
+	return item
+}
+
+func scanImportExportRouteItem(scanner rowScanner) (config.ImportExportRouteItem, error) {
+	var item config.ImportExportRouteItem
+	var custom sql.NullFloat64
+	err := scanner.Scan(
+		&item.ID,
+		&item.RouteID,
+		&item.TypeID,
+		&item.TypeName,
+		&item.CategoryID,
+		&item.GroupID,
+		&item.GroupName,
+		&custom,
+		&item.AddedAt,
+	)
+	if custom.Valid {
+		value := custom.Float64
+		item.CustomPurchaseDemandDays = &value
+	}
+	return item, err
 }
 
 type rowScanner interface {
@@ -203,7 +234,7 @@ func (d *DB) DeleteImportExportRouteForUser(userID string, routeID int64) error 
 func (d *DB) ListImportExportRouteItemsForUser(userID string, routeID int64) ([]config.ImportExportRouteItem, error) {
 	userID = normalizeUserID(userID)
 	rows, err := d.sql.Query(`
-		SELECT i.id, i.route_id, i.type_id, i.type_name, i.category_id, i.group_id, i.group_name, i.added_at
+		SELECT i.id, i.route_id, i.type_id, i.type_name, i.category_id, i.group_id, i.group_name, i.custom_purchase_demand_days, i.added_at
 		  FROM import_export_route_items i
 		  INNER JOIN import_export_routes r ON r.id = i.route_id
 		 WHERE r.user_id = ? AND i.route_id = ?
@@ -216,17 +247,8 @@ func (d *DB) ListImportExportRouteItemsForUser(userID string, routeID int64) ([]
 
 	var items []config.ImportExportRouteItem
 	for rows.Next() {
-		var item config.ImportExportRouteItem
-		if err := rows.Scan(
-			&item.ID,
-			&item.RouteID,
-			&item.TypeID,
-			&item.TypeName,
-			&item.CategoryID,
-			&item.GroupID,
-			&item.GroupName,
-			&item.AddedAt,
-		); err != nil {
+		item, err := scanImportExportRouteItem(rows)
+		if err != nil {
 			return nil, err
 		}
 		items = append(items, item)
@@ -249,13 +271,12 @@ func (d *DB) AddImportExportRouteItemForUser(userID string, routeID int64, item 
 		return config.ImportExportRouteItem{}, errors.New("item type is required")
 	}
 	item.RouteID = routeID
-	item.TypeName = strings.TrimSpace(item.TypeName)
-	item.GroupName = strings.TrimSpace(item.GroupName)
+	item = normalizeImportExportRouteItem(item)
 	now := time.Now().UTC().Format(time.RFC3339)
 	res, err := d.sql.Exec(`
-		INSERT OR IGNORE INTO import_export_route_items (route_id, type_id, type_name, category_id, group_id, group_name, added_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?)
-	`, routeID, item.TypeID, item.TypeName, item.CategoryID, item.GroupID, item.GroupName, now)
+		INSERT OR IGNORE INTO import_export_route_items (route_id, type_id, type_name, category_id, group_id, group_name, custom_purchase_demand_days, added_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+	`, routeID, item.TypeID, item.TypeName, item.CategoryID, item.GroupID, item.GroupName, item.CustomPurchaseDemandDays, now)
 	if err != nil {
 		return config.ImportExportRouteItem{}, err
 	}
@@ -264,18 +285,58 @@ func (d *DB) AddImportExportRouteItemForUser(userID string, routeID int64, item 
 		return config.ImportExportRouteItem{}, err
 	}
 	if id == 0 {
-		err = d.sql.QueryRow(`
-			SELECT i.id, i.route_id, i.type_id, i.type_name, i.category_id, i.group_id, i.group_name, i.added_at
+		item, err = scanImportExportRouteItem(d.sql.QueryRow(`
+			SELECT i.id, i.route_id, i.type_id, i.type_name, i.category_id, i.group_id, i.group_name, i.custom_purchase_demand_days, i.added_at
 			  FROM import_export_route_items i
 			  INNER JOIN import_export_routes r ON r.id = i.route_id
 			 WHERE r.user_id = ? AND i.route_id = ? AND i.type_id = ?
-		`, userID, routeID, item.TypeID).Scan(
-			&item.ID, &item.RouteID, &item.TypeID, &item.TypeName, &item.CategoryID, &item.GroupID, &item.GroupName, &item.AddedAt,
-		)
+		`, userID, routeID, item.TypeID))
 		return item, err
 	}
 	item.ID = id
 	item.AddedAt = now
+	return item, nil
+}
+
+func (d *DB) UpdateImportExportRouteItemForUser(userID string, routeID, itemID int64, customPurchaseDemandDays *float64) (config.ImportExportRouteItem, error) {
+	userID = normalizeUserID(userID)
+	if _, err := d.GetImportExportRouteForUser(userID, routeID); err != nil {
+		return config.ImportExportRouteItem{}, err
+	}
+	if customPurchaseDemandDays != nil && *customPurchaseDemandDays <= 0 {
+		customPurchaseDemandDays = nil
+	}
+	res, err := d.sql.Exec(`
+		UPDATE import_export_route_items
+		   SET custom_purchase_demand_days = ?
+		 WHERE id = ?
+		   AND route_id = ?
+		   AND EXISTS (
+			   SELECT 1
+			     FROM import_export_routes
+			    WHERE id = ? AND user_id = ?
+		   )
+	`, customPurchaseDemandDays, itemID, routeID, routeID, userID)
+	if err != nil {
+		return config.ImportExportRouteItem{}, err
+	}
+	affected, err := res.RowsAffected()
+	if err != nil {
+		return config.ImportExportRouteItem{}, err
+	}
+	if affected == 0 {
+		return config.ImportExportRouteItem{}, errors.New("item not found")
+	}
+
+	item, err := scanImportExportRouteItem(d.sql.QueryRow(`
+		SELECT i.id, i.route_id, i.type_id, i.type_name, i.category_id, i.group_id, i.group_name, i.custom_purchase_demand_days, i.added_at
+		  FROM import_export_route_items i
+		  INNER JOIN import_export_routes r ON r.id = i.route_id
+		 WHERE r.user_id = ? AND i.route_id = ? AND i.id = ?
+	`, userID, routeID, itemID))
+	if err != nil {
+		return config.ImportExportRouteItem{}, err
+	}
 	return item, nil
 }
 

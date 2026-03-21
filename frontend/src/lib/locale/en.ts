@@ -129,6 +129,8 @@ export const en = {
 
     // Table
     colItem: "Item",
+    colCategory: "Category",
+    colGroup: "Group",
     colType: "Type",
     colBuyPrice: "Best Ask (L1)",
     colExpectedBuyPrice: "Avg Buy Fill",

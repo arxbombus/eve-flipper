@@ -1,28 +1,42 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { Fragment } from "react";
 import {
   addImportExportRouteItem,
   analyzeImportExportRoute,
+  createImportExportTransitEntry,
+  createImportExportWarehouse,
   createImportExportRoute,
+  deleteImportExportTransitEntry,
+  deleteImportExportWarehouse,
   deleteImportExportRoute,
   deleteImportExportRouteItem,
   getCharacterInfo,
   getImportExportRoutes,
+  getImportExportRestockingOverview,
+  getImportExportTransitEntries,
+  getImportExportWarehouses,
   getStations,
   getStructures,
   searchItems,
+  updateImportExportRouteItem,
   updateImportExportRoute,
 } from "@/lib/api";
 import type {
   FlipResult,
   ImportExportRoute,
   ImportExportRouteAnalysis,
+  ImportExportRouteItem,
+  ImportExportRestockingOverview,
+  ImportExportTransitItem,
+  ImportExportTransitEntry,
+  ImportExportWarehouse,
   ItemSearchResult,
   RegionalTradeMode,
   StationInfo,
 } from "@/lib/types";
 import { Modal } from "./Modal";
 import { RegionAutocomplete } from "./RegionAutocomplete";
-import { ScanResultsTable } from "./ScanResultsTable";
+import { ImportExportResultsTable } from "./ImportExportResultsTable";
 import { SystemAutocomplete } from "./SystemAutocomplete";
 import {
   SettingsCheckbox,
@@ -45,6 +59,7 @@ type Props = {
 
 type GoodsSortMode = "name_asc" | "name_desc" | "category" | "group" | "recent";
 type GoodsGroupMode = "none" | "category" | "group";
+type ImportExportSubtab = "routes" | "restocking";
 
 type RouteFormState = {
   name: string;
@@ -64,6 +79,29 @@ type RouteFormState = {
   sell_sales_tax_percent: number;
 };
 
+type WarehouseFormState = {
+  name: string;
+  system_name: string;
+  system_id: number;
+  region_id: number;
+  location_id: number;
+  location_name: string;
+  is_structure: boolean;
+  include_structures: boolean;
+};
+
+type TransitEndpointState = {
+  system_name: string;
+  system_id: number;
+  region_id: number;
+  location_id: number;
+  location_name: string;
+  is_structure: boolean;
+  include_structures: boolean;
+};
+
+type TransitDraftMode = "search" | "clipboard";
+
 const DEFAULT_FORM: RouteFormState = {
   name: "",
   source_region_name: "",
@@ -80,6 +118,27 @@ const DEFAULT_FORM: RouteFormState = {
   buy_sales_tax_percent: 0,
   sell_broker_fee_percent: 0,
   sell_sales_tax_percent: 8,
+};
+
+const DEFAULT_WAREHOUSE_FORM: WarehouseFormState = {
+  name: "",
+  system_name: "",
+  system_id: 0,
+  region_id: 0,
+  location_id: 0,
+  location_name: "",
+  is_structure: false,
+  include_structures: false,
+};
+
+const DEFAULT_TRANSIT_ENDPOINT: TransitEndpointState = {
+  system_name: "",
+  system_id: 0,
+  region_id: 0,
+  location_id: 0,
+  location_name: "",
+  is_structure: false,
+  include_structures: false,
 };
 
 function importExportCategoryName(categoryID: number) {
@@ -137,6 +196,34 @@ function writeSidebarCollapsed(value: boolean) {
   }
 }
 
+function formatDemandDays(value: number | null | undefined) {
+  if (value == null) return "-";
+  return `${value}d`;
+}
+
+function parseDemandDaysDraft(raw: string): number | null | "invalid" {
+  const trimmed = raw.trim();
+  if (trimmed === "") return null;
+  const parsed = Number(trimmed);
+  if (!Number.isFinite(parsed) || parsed <= 0) return "invalid";
+  return parsed;
+}
+
+function formatTransitClipboardInput(raw: string) {
+  return raw.replace(/\r/g, " ").replace(/\n/g, " ").trim();
+}
+
+function parseTransitClipboard(raw: string) {
+  const normalized = formatTransitClipboardInput(raw);
+  const matches = Array.from(normalized.matchAll(/(.+?)\s*x\s*([\d,]+)(?=[^\d]|$)/gi));
+  return matches
+    .map((match) => ({
+      type_name: match[1]?.trim() ?? "",
+      quantity: Number((match[2] ?? "").replace(/,/g, "")),
+    }))
+    .filter((entry) => entry.type_name.length > 0 && Number.isFinite(entry.quantity) && entry.quantity > 0);
+}
+
 export function ImportExportTab({ isLoggedIn }: Props) {
   const [routes, setRoutes] = useState<ImportExportRoute[]>([]);
   const [selectedRouteId, setSelectedRouteId] = useState<number | null>(null);
@@ -151,6 +238,7 @@ export function ImportExportTab({ isLoggedIn }: Props) {
   const [error, setError] = useState("");
   const [sidebarCollapsed, setSidebarCollapsed] = useState(readSidebarCollapsed);
   const [createModalOpen, setCreateModalOpen] = useState(false);
+  const [routeModalMode, setRouteModalMode] = useState<"create" | "edit">("create");
   const [createForm, setCreateForm] = useState<RouteFormState>(DEFAULT_FORM);
   const [esiMsg, setEsiMsg] = useState<string | null>(null);
   const [esiLoading, setEsiLoading] = useState(false);
@@ -160,6 +248,40 @@ export function ImportExportTab({ isLoggedIn }: Props) {
   const [selectedItem, setSelectedItem] = useState<ItemSearchResult | null>(null);
   const [goodsSort, setGoodsSort] = useState<GoodsSortMode>("name_asc");
   const [goodsGroup, setGoodsGroup] = useState<GoodsGroupMode>("none");
+  const [activeSubtab, setActiveSubtab] = useState<ImportExportSubtab>("routes");
+  const [restockingOverview, setRestockingOverview] = useState<ImportExportRestockingOverview | null>(null);
+  const [restockingStale, setRestockingStale] = useState(false);
+  const [warehouses, setWarehouses] = useState<ImportExportWarehouse[]>([]);
+  const [transitEntries, setTransitEntries] = useState<ImportExportTransitEntry[]>([]);
+  const [warehouseForm, setWarehouseForm] = useState<WarehouseFormState>(DEFAULT_WAREHOUSE_FORM);
+  const [warehouseStations, setWarehouseStations] = useState<StationInfo[]>([]);
+  const [warehouseStructures, setWarehouseStructures] = useState<StationInfo[]>([]);
+  const [loadingWarehouseStations, setLoadingWarehouseStations] = useState(false);
+  const [loadingWarehouseStructures, setLoadingWarehouseStructures] = useState(false);
+  const [savingWarehouse, setSavingWarehouse] = useState(false);
+  const [savingTransit, setSavingTransit] = useState(false);
+  const [allDemandDaysDraft, setAllDemandDaysDraft] = useState("");
+  const [groupDemandDaysDrafts, setGroupDemandDaysDrafts] = useState<Record<string, string>>({});
+  const [itemDemandDaysDrafts, setItemDemandDaysDrafts] = useState<Record<number, string>>({});
+  const [transitFrom, setTransitFrom] = useState<TransitEndpointState>(DEFAULT_TRANSIT_ENDPOINT);
+  const [transitTo, setTransitTo] = useState<TransitEndpointState>(DEFAULT_TRANSIT_ENDPOINT);
+  const [transitFromStations, setTransitFromStations] = useState<StationInfo[]>([]);
+  const [transitFromStructures, setTransitFromStructures] = useState<StationInfo[]>([]);
+  const [transitToStations, setTransitToStations] = useState<StationInfo[]>([]);
+  const [transitToStructures, setTransitToStructures] = useState<StationInfo[]>([]);
+  const [loadingTransitFromStations, setLoadingTransitFromStations] = useState(false);
+  const [loadingTransitFromStructures, setLoadingTransitFromStructures] = useState(false);
+  const [loadingTransitToStations, setLoadingTransitToStations] = useState(false);
+  const [loadingTransitToStructures, setLoadingTransitToStructures] = useState(false);
+  const [transitDraftMode, setTransitDraftMode] = useState<TransitDraftMode>("search");
+  const [transitItemQuantity, setTransitItemQuantity] = useState(1);
+  const [transitClipboardText, setTransitClipboardText] = useState("");
+  const [transitDraftItems, setTransitDraftItems] = useState<ImportExportTransitItem[]>([]);
+  const [transitItemQuery, setTransitItemQuery] = useState("");
+  const [transitItemResults, setTransitItemResults] = useState<ItemSearchResult[]>([]);
+  const [transitItemOpen, setTransitItemOpen] = useState(false);
+  const [selectedTransitItem, setSelectedTransitItem] = useState<ItemSearchResult | null>(null);
+  const [expandedWarehouseIds, setExpandedWarehouseIds] = useState<number[]>([]);
   const [targetStations, setTargetStations] = useState<StationInfo[]>([]);
   const [targetStructures, setTargetStructures] = useState<StationInfo[]>([]);
   const [loadingStations, setLoadingStations] = useState(false);
@@ -202,6 +324,47 @@ export function ImportExportTab({ isLoggedIn }: Props) {
     return merged;
   }, [createForm.include_structures, createTargetStations, createTargetStructures, isLoggedIn]);
 
+  const warehouseLocations = useMemo(() => {
+    const merged = warehouseForm.include_structures && isLoggedIn
+      ? [...warehouseStations, ...warehouseStructures]
+      : [...warehouseStations];
+    merged.sort((a, b) => a.name.localeCompare(b.name));
+    return merged;
+  }, [isLoggedIn, warehouseForm.include_structures, warehouseStations, warehouseStructures]);
+
+  const transitFromLocations = useMemo(() => {
+    const merged = transitFrom.include_structures && isLoggedIn
+      ? [...transitFromStations, ...transitFromStructures]
+      : [...transitFromStations];
+    merged.sort((a, b) => a.name.localeCompare(b.name));
+    return merged;
+  }, [isLoggedIn, transitFrom.include_structures, transitFromStations, transitFromStructures]);
+
+  const transitToLocations = useMemo(() => {
+    const merged = transitTo.include_structures && isLoggedIn
+      ? [...transitToStations, ...transitToStructures]
+      : [...transitToStations];
+    merged.sort((a, b) => a.name.localeCompare(b.name));
+    return merged;
+  }, [isLoggedIn, transitTo.include_structures, transitToStations, transitToStructures]);
+
+  const allTrackedItems = useMemo(() => {
+    const itemsByType = new Map<number, ImportExportRouteItem>();
+    for (const route of routes) {
+      for (const item of route.items) {
+        if (!itemsByType.has(item.type_id)) {
+          itemsByType.set(item.type_id, item);
+        }
+      }
+    }
+    return Array.from(itemsByType.values()).sort((a, b) => a.type_name.localeCompare(b.type_name));
+  }, [routes]);
+
+  const displayedWarehouses = useMemo(
+    () => restockingOverview?.warehouses ?? warehouses.map((warehouse) => ({ ...warehouse, items: [] })),
+    [restockingOverview, warehouses],
+  );
+
   const loadRoutes = useCallback(async (preferredRouteId?: number | null) => {
     setLoadingRoutes(true);
     setError("");
@@ -224,6 +387,28 @@ export function ImportExportTab({ isLoggedIn }: Props) {
     }
   }, [selectedRouteId]);
 
+  const loadRestocking = useCallback(async () => {
+    try {
+      const [nextOverview, nextWarehouses, nextTransit] = await Promise.all([
+        getImportExportRestockingOverview(),
+        getImportExportWarehouses(),
+        getImportExportTransitEntries(),
+      ]);
+      setRestockingOverview(nextOverview);
+      setRestockingStale(false);
+      setWarehouses(nextWarehouses);
+      setTransitEntries(nextTransit);
+      setExpandedWarehouseIds((prev) => prev.filter((id) => nextWarehouses.some((warehouse) => warehouse.id === id)));
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "Failed to load restocking data");
+    }
+  }, []);
+
+  const markRestockingStale = useCallback(() => {
+    setRestockingOverview(null);
+    setRestockingStale(true);
+  }, []);
+
   const refreshAnalysis = useCallback(async (routeId: number) => {
     setAnalyzing(true);
     setProgress("Refreshing route analysis...");
@@ -245,12 +430,13 @@ export function ImportExportTab({ isLoggedIn }: Props) {
 
   useEffect(() => {
     void loadRoutes();
+    void loadRestocking();
     return () => {
       if (searchTimerRef.current) clearTimeout(searchTimerRef.current);
       searchAbortRef.current?.abort();
       if (esiMsgTimerRef.current) clearTimeout(esiMsgTimerRef.current);
     };
-  }, [loadRoutes]);
+  }, [loadRestocking, loadRoutes]);
 
   useEffect(() => {
     if (!selectedRoute) return;
@@ -291,6 +477,153 @@ export function ImportExportTab({ isLoggedIn }: Props) {
 
     return () => controller.abort();
   }, [routeForm.target_market_system_name]);
+
+  useEffect(() => {
+    const targetSystem = warehouseForm.system_name.trim();
+    if (!targetSystem) {
+      setWarehouseStations([]);
+      setWarehouseStructures([]);
+      setWarehouseForm((prev) => ({ ...prev, system_id: 0, region_id: 0, location_id: 0, location_name: "", is_structure: false }));
+      return;
+    }
+
+    const controller = new AbortController();
+    setLoadingWarehouseStations(true);
+    getStations(targetSystem, controller.signal)
+      .then((resp) => {
+        if (controller.signal.aborted) return;
+        setWarehouseStations(resp.stations);
+        setWarehouseForm((prev) => ({ ...prev, system_id: resp.system_id, region_id: resp.region_id }));
+      })
+      .catch(() => {
+        if (controller.signal.aborted) return;
+        setWarehouseStations([]);
+        setWarehouseForm((prev) => ({ ...prev, system_id: 0, region_id: 0 }));
+      })
+      .finally(() => {
+        if (!controller.signal.aborted) setLoadingWarehouseStations(false);
+      });
+    return () => controller.abort();
+  }, [warehouseForm.system_name]);
+
+  useEffect(() => {
+    if (!warehouseForm.include_structures || !isLoggedIn || warehouseForm.system_id <= 0 || warehouseForm.region_id <= 0) {
+      setWarehouseStructures([]);
+      return;
+    }
+    const controller = new AbortController();
+    setLoadingWarehouseStructures(true);
+    getStructures(warehouseForm.system_id, warehouseForm.region_id, controller.signal)
+      .then((resp) => {
+        if (controller.signal.aborted) return;
+        setWarehouseStructures(resp);
+      })
+      .catch(() => {
+        if (!controller.signal.aborted) setWarehouseStructures([]);
+      })
+      .finally(() => {
+        if (!controller.signal.aborted) setLoadingWarehouseStructures(false);
+      });
+    return () => controller.abort();
+  }, [isLoggedIn, warehouseForm.include_structures, warehouseForm.region_id, warehouseForm.system_id]);
+
+  useEffect(() => {
+    const targetSystem = transitFrom.system_name.trim();
+    if (!targetSystem) {
+      setTransitFromStations([]);
+      setTransitFromStructures([]);
+      setTransitFrom((prev) => ({ ...prev, system_id: 0, region_id: 0, location_id: 0, location_name: "", is_structure: false }));
+      return;
+    }
+
+    const controller = new AbortController();
+    setLoadingTransitFromStations(true);
+    getStations(targetSystem, controller.signal)
+      .then((resp) => {
+        if (controller.signal.aborted) return;
+        setTransitFromStations(resp.stations);
+        setTransitFrom((prev) => ({ ...prev, system_id: resp.system_id, region_id: resp.region_id }));
+      })
+      .catch(() => {
+        if (controller.signal.aborted) return;
+        setTransitFromStations([]);
+        setTransitFrom((prev) => ({ ...prev, system_id: 0, region_id: 0 }));
+      })
+      .finally(() => {
+        if (!controller.signal.aborted) setLoadingTransitFromStations(false);
+      });
+    return () => controller.abort();
+  }, [transitFrom.system_name]);
+
+  useEffect(() => {
+    if (!transitFrom.include_structures || !isLoggedIn || transitFrom.system_id <= 0 || transitFrom.region_id <= 0) {
+      setTransitFromStructures([]);
+      return;
+    }
+    const controller = new AbortController();
+    setLoadingTransitFromStructures(true);
+    getStructures(transitFrom.system_id, transitFrom.region_id, controller.signal)
+      .then((resp) => {
+        if (controller.signal.aborted) return;
+        setTransitFromStructures(resp);
+      })
+      .catch(() => {
+        if (!controller.signal.aborted) setTransitFromStructures([]);
+      })
+      .finally(() => {
+        if (!controller.signal.aborted) setLoadingTransitFromStructures(false);
+      });
+    return () => controller.abort();
+  }, [isLoggedIn, transitFrom.include_structures, transitFrom.region_id, transitFrom.system_id]);
+
+  useEffect(() => {
+    const targetSystem = transitTo.system_name.trim();
+    if (!targetSystem) {
+      setTransitToStations([]);
+      setTransitToStructures([]);
+      setTransitTo((prev) => ({ ...prev, system_id: 0, region_id: 0, location_id: 0, location_name: "", is_structure: false }));
+      return;
+    }
+
+    const controller = new AbortController();
+    setLoadingTransitToStations(true);
+    getStations(targetSystem, controller.signal)
+      .then((resp) => {
+        if (controller.signal.aborted) return;
+        setTransitToStations(resp.stations);
+        setTransitTo((prev) => ({ ...prev, system_id: resp.system_id, region_id: resp.region_id }));
+      })
+      .catch(() => {
+        if (controller.signal.aborted) return;
+        setTransitToStations([]);
+        setTransitTo((prev) => ({ ...prev, system_id: 0, region_id: 0 }));
+      })
+      .finally(() => {
+        if (!controller.signal.aborted) setLoadingTransitToStations(false);
+      });
+    return () => controller.abort();
+  }, [transitTo.system_name]);
+
+  useEffect(() => {
+    if (!transitTo.include_structures || !isLoggedIn || transitTo.system_id <= 0 || transitTo.region_id <= 0) {
+      setTransitToStructures([]);
+      return;
+    }
+    const controller = new AbortController();
+    setLoadingTransitToStructures(true);
+    getStructures(transitTo.system_id, transitTo.region_id, controller.signal)
+      .then((resp) => {
+        if (controller.signal.aborted) return;
+        setTransitToStructures(resp);
+      })
+      .catch(() => {
+        if (!controller.signal.aborted) setTransitToStructures([]);
+      })
+      .finally(() => {
+        if (!controller.signal.aborted) setLoadingTransitToStructures(false);
+      });
+    return () => controller.abort();
+  }, [isLoggedIn, transitTo.include_structures, transitTo.region_id, transitTo.system_id]);
 
   useEffect(() => {
     if (!routeForm.include_structures || !isLoggedIn || targetSystemID <= 0 || targetRegionID <= 0) {
@@ -400,28 +733,54 @@ export function ImportExportTab({ isLoggedIn }: Props) {
 
   const openCreateModal = useCallback(() => {
     setError("");
+    setRouteModalMode("create");
     setCreateForm(DEFAULT_FORM);
     setCreateModalOpen(true);
   }, []);
 
+  const openEditModal = useCallback(() => {
+    if (!selectedRoute) return;
+    setError("");
+    setRouteModalMode("edit");
+    setCreateForm(routeToForm(selectedRoute));
+    setCreateModalOpen(true);
+  }, [selectedRoute]);
+
   const closeCreateModal = useCallback(() => {
     setCreateModalOpen(false);
+    setRouteModalMode("create");
     setCreateForm(DEFAULT_FORM);
   }, []);
 
-  const handleCreateRoute = useCallback(async () => {
+  const handleSubmitRoute = useCallback(async () => {
     setSavingRoute(true);
     setError("");
     try {
+      if (routeModalMode === "edit" && selectedRoute) {
+        const updated = await updateImportExportRoute(selectedRoute.id, createForm);
+        setRoutes((prev) =>
+          prev.map((route) => (route.id === updated.id ? { ...updated, items: route.items } : route)),
+        );
+        setSelectedRouteId(updated.id);
+        setRouteForm(routeToForm(updated));
+        closeCreateModal();
+        return;
+      }
       const created = await createImportExportRoute(createForm);
       closeCreateModal();
       await loadRoutes(created.id);
     } catch (e) {
-      setError(e instanceof Error ? e.message : "Failed to create route");
+      setError(
+        e instanceof Error
+          ? e.message
+          : routeModalMode === "edit"
+            ? "Failed to update route"
+            : "Failed to create route",
+      );
     } finally {
       setSavingRoute(false);
     }
-  }, [closeCreateModal, createForm, loadRoutes]);
+  }, [closeCreateModal, createForm, loadRoutes, routeModalMode, selectedRoute]);
 
   useEffect(() => {
     if (!selectedRoute) return;
@@ -496,6 +855,31 @@ export function ImportExportTab({ isLoggedIn }: Props) {
     }, 200);
   }, []);
 
+  const runTransitItemSearch = useCallback((query: string) => {
+    setTransitItemQuery(query);
+    setSelectedTransitItem(null);
+    if (searchTimerRef.current) clearTimeout(searchTimerRef.current);
+    searchAbortRef.current?.abort();
+    if (query.trim().length < 2) {
+      setTransitItemResults([]);
+      setTransitItemOpen(false);
+      return;
+    }
+    searchTimerRef.current = setTimeout(async () => {
+      const controller = new AbortController();
+      searchAbortRef.current = controller;
+      try {
+        const results = await searchItems(query, 20, controller.signal);
+        setTransitItemResults(results);
+        setTransitItemOpen(results.length > 0);
+      } catch (e) {
+        if (e instanceof Error && e.name === "AbortError") return;
+        setTransitItemResults([]);
+        setTransitItemOpen(false);
+      }
+    }, 200);
+  }, []);
+
   const handleAddItem = useCallback(async () => {
     if (!selectedRoute || !selectedItem) return;
     setMutatingItems(true);
@@ -533,6 +917,216 @@ export function ImportExportTab({ isLoggedIn }: Props) {
       setMutatingItems(false);
     }
   }, [loadRoutes, selectedRoute]);
+
+  const persistCustomDemandDays = useCallback(async (items: ImportExportRouteItem[], nextValue: number | null) => {
+    if (!selectedRoute || items.length === 0) return;
+    setMutatingItems(true);
+    setError("");
+    try {
+      await Promise.all(
+        items.map((item) => updateImportExportRouteItem(selectedRoute.id, item.id, {
+          custom_purchase_demand_days: nextValue,
+        })),
+      );
+      await loadRoutes(selectedRoute.id);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "Failed to update tracked goods");
+    } finally {
+      setMutatingItems(false);
+    }
+  }, [loadRoutes, selectedRoute]);
+
+  const handleSubmitDemandDaysDraft = useCallback(async (
+    items: ImportExportRouteItem[],
+    rawValue: string,
+    onReset: (value: string) => void,
+  ) => {
+    const parsed = parseDemandDaysDraft(rawValue);
+    if (parsed === "invalid") {
+      setError("Purchase demand days must be a positive number or blank.");
+      onReset(items.length === 1 && items[0]?.custom_purchase_demand_days != null ? String(items[0].custom_purchase_demand_days) : "");
+      return;
+    }
+    await persistCustomDemandDays(items, parsed);
+  }, [persistCustomDemandDays]);
+
+  const handleCreateWarehouse = useCallback(async () => {
+    if (warehouseForm.system_id <= 0 || warehouseForm.location_id <= 0 || !warehouseForm.location_name.trim()) {
+      setError("Choose a warehouse system and location.");
+      return;
+    }
+    setSavingWarehouse(true);
+    setError("");
+    try {
+      const created = await createImportExportWarehouse({
+        name: warehouseForm.name.trim() || warehouseForm.location_name,
+        system_id: warehouseForm.system_id,
+        system_name: warehouseForm.system_name.trim(),
+        location_id: warehouseForm.location_id,
+        location_name: warehouseForm.location_name.trim(),
+        is_structure: warehouseForm.is_structure,
+      });
+      setWarehouses((prev) => [created, ...prev.filter((warehouse) => warehouse.id !== created.id)]);
+      setWarehouseForm(DEFAULT_WAREHOUSE_FORM);
+      setWarehouseStations([]);
+      setWarehouseStructures([]);
+      markRestockingStale();
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "Failed to create warehouse");
+    } finally {
+      setSavingWarehouse(false);
+    }
+  }, [markRestockingStale, warehouseForm]);
+
+  const handleDeleteWarehouse = useCallback(async (warehouseId: number) => {
+    setSavingWarehouse(true);
+    setError("");
+    try {
+      await deleteImportExportWarehouse(warehouseId);
+      setWarehouses((prev) => prev.filter((warehouse) => warehouse.id !== warehouseId));
+      markRestockingStale();
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "Failed to delete warehouse");
+    } finally {
+      setSavingWarehouse(false);
+    }
+  }, [markRestockingStale]);
+
+  const handleAddTransitDraftItem = useCallback(() => {
+    if (!selectedTransitItem) {
+      setError("Choose an item to add to the delivery contract.");
+      return;
+    }
+    if (transitItemQuantity <= 0) {
+      setError("Transit quantity must be positive.");
+      return;
+    }
+    setTransitDraftItems((prev) => {
+      const existing = prev.find((item) => item.type_id === selectedTransitItem.type_id);
+      if (existing) {
+        return prev.map((item) => item.type_id === selectedTransitItem.type_id
+          ? { ...item, quantity: item.quantity + transitItemQuantity }
+          : item);
+      }
+      return [...prev, {
+        type_id: selectedTransitItem.type_id,
+        type_name: selectedTransitItem.type_name,
+        quantity: transitItemQuantity,
+      }];
+    });
+    setTransitItemQuery("");
+    setTransitItemResults([]);
+    setTransitItemOpen(false);
+    setSelectedTransitItem(null);
+    setTransitItemQuantity(1);
+  }, [selectedTransitItem, transitItemQuantity]);
+
+  const handleImportTransitClipboard = useCallback(() => {
+    const parsed = parseTransitClipboard(transitClipboardText);
+    if (parsed.length === 0) {
+      setError("Clipboard mode could not parse any item lines.");
+      return;
+    }
+    const trackedByName = new Map(allTrackedItems.map((item) => [item.type_name.toLowerCase(), item]));
+    const unresolved: string[] = [];
+    const nextItems = new Map<number, ImportExportTransitItem>();
+    for (const entry of parsed) {
+      const matched = trackedByName.get(entry.type_name.toLowerCase());
+      if (!matched) {
+        unresolved.push(entry.type_name);
+        continue;
+      }
+      const existing = nextItems.get(matched.type_id);
+      nextItems.set(matched.type_id, {
+        type_id: matched.type_id,
+        type_name: matched.type_name,
+        quantity: (existing?.quantity ?? 0) + entry.quantity,
+      });
+    }
+    if (unresolved.length > 0) {
+      setError(`Could not match tracked items: ${unresolved.join(", ")}`);
+      return;
+    }
+    setTransitDraftItems((prev) => {
+      const merged = new Map(prev.map((item) => [item.type_id, item]));
+      for (const item of nextItems.values()) {
+        const existing = merged.get(item.type_id);
+        merged.set(item.type_id, {
+          ...item,
+          quantity: (existing?.quantity ?? 0) + item.quantity,
+        });
+      }
+      return Array.from(merged.values()).sort((a, b) => a.type_name.localeCompare(b.type_name));
+    });
+    setTransitClipboardText("");
+  }, [allTrackedItems, transitClipboardText]);
+
+  const handleCreateTransitEntry = useCallback(async () => {
+    if (transitFrom.system_id <= 0 || transitFrom.location_id <= 0 || !transitFrom.location_name.trim()) {
+      setError("Choose a source system and station/structure.");
+      return;
+    }
+    if (transitTo.system_id <= 0 || transitTo.location_id <= 0 || !transitTo.location_name.trim()) {
+      setError("Choose a destination system and station/structure.");
+      return;
+    }
+    if (transitDraftItems.length === 0) {
+      setError("Add at least one item to the delivery contract.");
+      return;
+    }
+    setSavingTransit(true);
+    setError("");
+    try {
+      const created = await createImportExportTransitEntry({
+        from_system_id: transitFrom.system_id,
+        from_system_name: transitFrom.system_name.trim(),
+        from_location_id: transitFrom.location_id,
+        from_location_name: transitFrom.location_name.trim(),
+        to_system_id: transitTo.system_id,
+        to_system_name: transitTo.system_name.trim(),
+        to_location_id: transitTo.location_id,
+        to_location_name: transitTo.location_name.trim(),
+        items: transitDraftItems.map((item) => ({
+          type_id: item.type_id,
+          type_name: item.type_name,
+          quantity: item.quantity,
+        })),
+      });
+      setTransitEntries((prev) => [created, ...prev.filter((entry) => entry.id !== created.id)]);
+      setTransitFrom(DEFAULT_TRANSIT_ENDPOINT);
+      setTransitTo(DEFAULT_TRANSIT_ENDPOINT);
+      setTransitFromStations([]);
+      setTransitFromStructures([]);
+      setTransitToStations([]);
+      setTransitToStructures([]);
+      setTransitDraftItems([]);
+      setTransitClipboardText("");
+      setTransitItemQuery("");
+      setTransitItemResults([]);
+      setTransitItemOpen(false);
+      setSelectedTransitItem(null);
+      setTransitItemQuantity(1);
+      markRestockingStale();
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "Failed to create transit entry");
+    } finally {
+      setSavingTransit(false);
+    }
+  }, [markRestockingStale, transitDraftItems, transitFrom, transitTo]);
+
+  const handleDeleteTransitEntry = useCallback(async (entryId: number) => {
+    setSavingTransit(true);
+    setError("");
+    try {
+      await deleteImportExportTransitEntry(entryId);
+      setTransitEntries((prev) => prev.filter((entry) => entry.id !== entryId));
+      markRestockingStale();
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "Failed to delete transit entry");
+    } finally {
+      setSavingTransit(false);
+    }
+  }, [markRestockingStale]);
 
   const routeItems = selectedRoute?.items ?? [];
   const organizedRouteItems = useMemo(() => {
@@ -574,8 +1168,54 @@ export function ImportExportTab({ isLoggedIn }: Props) {
     return Array.from(groups.entries()).map(([label, items]) => ({ key: label, label, items }));
   }, [goodsGroup, organizedRouteItems]);
 
+  useEffect(() => {
+    setAllDemandDaysDraft("");
+    setItemDemandDaysDrafts(
+      Object.fromEntries(routeItems.map((item) => [item.id, item.custom_purchase_demand_days == null ? "" : String(item.custom_purchase_demand_days)])),
+    );
+  }, [routeItems]);
+
+  useEffect(() => {
+    const drafts: Record<string, string> = {};
+    for (const group of groupedRouteItems) {
+      if (!group.label) continue;
+      const values = [...new Set(group.items.map((item) => item.custom_purchase_demand_days == null ? "" : String(item.custom_purchase_demand_days)))];
+      drafts[group.key] = values.length === 1 ? values[0] : "";
+    }
+    setGroupDemandDaysDrafts(drafts);
+  }, [groupedRouteItems]);
+
   return (
-    <div className="flex-1 min-h-0 min-w-0 flex gap-3 overflow-auto">
+    <div className="flex-1 min-h-0 min-w-0 flex flex-col gap-3 overflow-auto pr-1">
+      <div className="flex items-center gap-2 bg-eve-panel border border-eve-border rounded-sm px-2 py-2">
+        <button
+          type="button"
+          onClick={() => setActiveSubtab("routes")}
+          className={cn(
+            "px-3 py-1.5 rounded-sm text-xs uppercase tracking-[0.12em] border",
+            activeSubtab === "routes"
+              ? "border-eve-accent bg-eve-accent/15 text-eve-accent"
+              : "border-eve-border text-eve-dim hover:text-eve-text hover:bg-eve-panel-hover",
+          )}
+        >
+          Routes & Profitability
+        </button>
+        <button
+          type="button"
+          onClick={() => setActiveSubtab("restocking")}
+          className={cn(
+            "px-3 py-1.5 rounded-sm text-xs uppercase tracking-[0.12em] border",
+            activeSubtab === "restocking"
+              ? "border-eve-accent bg-eve-accent/15 text-eve-accent"
+              : "border-eve-border text-eve-dim hover:text-eve-text hover:bg-eve-panel-hover",
+          )}
+        >
+          Restocking
+        </button>
+      </div>
+
+      <div className="flex-1 min-h-0 min-w-0 flex gap-3">
+      {activeSubtab === "routes" && (
       <aside
         className={`${
           sidebarCollapsed ? "w-12" : "w-72 xl:w-80"
@@ -677,28 +1317,41 @@ export function ImportExportTab({ isLoggedIn }: Props) {
           </div>
         )}
       </aside>
+      )}
 
-      <section className="flex-1 min-h-0 min-w-0 flex flex-col gap-3 overflow-auto">
-        {!selectedRoute && (
-          <div className="flex-1 min-h-0 bg-eve-panel border border-eve-border rounded-sm flex items-center justify-center text-eve-dim">
+      <section className="flex-1 min-h-0 min-w-0 flex flex-col gap-3 overflow-visible">
+        {activeSubtab === "routes" && !selectedRoute && (
+          <div className="min-h-[16rem] bg-eve-panel border border-eve-border rounded-sm flex items-center justify-center text-eve-dim">
             No routes created yet
           </div>
         )}
 
-        {selectedRoute && (
+        {(selectedRoute || activeSubtab === "restocking") && (
           <>
+            {activeSubtab === "routes" && (
             <div className="flex items-center justify-between gap-3 bg-eve-panel border border-eve-border rounded-sm px-3 py-2">
               <div>
-                <div className="text-sm text-eve-text font-medium">{selectedRoute.name}</div>
+                <div className="text-sm text-eve-text font-medium">{selectedRoute!.name}</div>
                 <div className="text-[11px] text-eve-dim">
                   {routeForm.source_region_name} {"->"} {routeForm.target_market_system_name}
                   {routeForm.target_market_location_name ? ` / ${routeForm.target_market_location_name}` : ""}
+                </div>
+                <div className="mt-1 text-[10px] uppercase tracking-[0.12em] text-eve-dim">
+                  Route jumps: <span className="text-eve-accent">{analysis?.route_jumps ?? 0}</span>
                 </div>
               </div>
               <div className="flex items-center gap-2">
                 <button
                   type="button"
-                  onClick={() => void refreshAnalysis(selectedRoute.id)}
+                  onClick={openEditModal}
+                  disabled={analyzing || savingRoute}
+                  className="px-3 py-1.5 rounded-sm border border-eve-border text-xs uppercase tracking-[0.12em] hover:bg-eve-panel-hover disabled:opacity-50"
+                >
+                  Edit Route
+                </button>
+                <button
+                  type="button"
+                  onClick={() => void refreshAnalysis(selectedRoute!.id)}
                   disabled={analyzing || savingRoute}
                   className="px-3 py-1.5 rounded-sm border border-eve-border text-xs uppercase tracking-[0.12em] hover:bg-eve-panel-hover disabled:opacity-50"
                 >
@@ -706,7 +1359,10 @@ export function ImportExportTab({ isLoggedIn }: Props) {
                 </button>
               </div>
             </div>
+            )}
 
+            {activeSubtab === "routes" ? (
+              <>
             <TabSettingsPanel
               title="Route Config"
               hint="Saved per route"
@@ -715,13 +1371,6 @@ export function ImportExportTab({ isLoggedIn }: Props) {
               persistKey="import-export-route-config"
             >
               <SettingsGrid cols={4}>
-                <SettingsField label="Route Name">
-                  <input
-                    value={routeForm.name}
-                    onChange={(e) => setRouteForm((prev) => ({ ...prev, name: e.target.value }))}
-                    className="w-full px-3 py-1.5 bg-eve-input border border-eve-border rounded-sm text-eve-text text-sm"
-                  />
-                </SettingsField>
                 <SettingsField label="Source Region">
                   <RegionAutocomplete
                     value={routeForm.source_region_name}
@@ -908,7 +1557,26 @@ export function ImportExportTab({ isLoggedIn }: Props) {
               defaultExpanded
               persistKey="import-export-tracked-goods"
               headerExtra={
-                <div className="flex items-center gap-2">
+                <div className="flex flex-wrap items-center gap-2">
+                  <label className="flex items-center gap-2 text-[11px] uppercase tracking-[0.12em] text-eve-dim">
+                    <span>All DoD</span>
+                    <input
+                      type="number"
+                      min="0"
+                      step="0.01"
+                      value={allDemandDaysDraft}
+                      placeholder="-"
+                      onChange={(e) => setAllDemandDaysDraft(e.target.value)}
+                      onBlur={() => void handleSubmitDemandDaysDraft(routeItems, allDemandDaysDraft, setAllDemandDaysDraft)}
+                      onKeyDown={(e) => {
+                        if (e.key === "Enter") {
+                          e.preventDefault();
+                          void handleSubmitDemandDaysDraft(routeItems, allDemandDaysDraft, setAllDemandDaysDraft);
+                        }
+                      }}
+                      className="w-20 px-2 py-1 bg-eve-input border border-eve-border rounded-sm text-[11px] text-eve-text"
+                    />
+                  </label>
                   <select
                     value={goodsSort}
                     onChange={(e) => setGoodsSort(e.target.value as GoodsSortMode)}
@@ -981,8 +1649,37 @@ export function ImportExportTab({ isLoggedIn }: Props) {
                 {groupedRouteItems.map((group) => (
                   <div key={group.key} className="space-y-2">
                     {group.label && (
-                      <div className="px-1 text-[11px] uppercase tracking-[0.12em] text-eve-dim">
-                        {group.label}
+                      <div className="px-1 flex items-center justify-between gap-3">
+                        <div className="text-[11px] uppercase tracking-[0.12em] text-eve-dim">
+                          {group.label}
+                        </div>
+                        <label className="flex items-center gap-2 text-[11px] uppercase tracking-[0.12em] text-eve-dim">
+                          <span>Group DoD</span>
+                          <input
+                            type="number"
+                            min="0"
+                            step="0.01"
+                            value={groupDemandDaysDrafts[group.key] ?? ""}
+                            placeholder="-"
+                            onChange={(e) => setGroupDemandDaysDrafts((prev) => ({ ...prev, [group.key]: e.target.value }))}
+                            onBlur={() => void handleSubmitDemandDaysDraft(
+                              group.items,
+                              groupDemandDaysDrafts[group.key] ?? "",
+                              (value) => setGroupDemandDaysDrafts((prev) => ({ ...prev, [group.key]: value })),
+                            )}
+                            onKeyDown={(e) => {
+                              if (e.key === "Enter") {
+                                e.preventDefault();
+                                void handleSubmitDemandDaysDraft(
+                                  group.items,
+                                  groupDemandDaysDrafts[group.key] ?? "",
+                                  (value) => setGroupDemandDaysDrafts((prev) => ({ ...prev, [group.key]: value })),
+                                );
+                              }
+                            }}
+                            className="w-20 px-2 py-1 bg-eve-input border border-eve-border rounded-sm text-[11px] text-eve-text"
+                          />
+                        </label>
                       </div>
                     )}
                     {group.items.map((item) => (
@@ -993,14 +1690,47 @@ export function ImportExportTab({ isLoggedIn }: Props) {
                             {importExportCategoryName(item.category_id)}
                             {item.group_name ? ` / ${item.group_name}` : ""}
                           </div>
+                          <div className="mt-1 text-[10px] uppercase tracking-[0.12em] text-eve-dim">
+                            Custom DoD: <span className="text-eve-accent">{formatDemandDays(item.custom_purchase_demand_days)}</span>
+                            {item.custom_purchase_demand_days == null ? ` · Route default ${formatDemandDays(routeForm.purchase_demand_days)}` : ""}
+                          </div>
                         </div>
-                        <button
-                          type="button"
-                          onClick={() => void handleDeleteItem(item.id)}
-                          className="text-[11px] uppercase tracking-[0.12em] text-eve-error hover:text-eve-error/80"
-                        >
-                          Remove
-                        </button>
+                        <div className="flex items-center gap-3">
+                          <label className="flex items-center gap-2 text-[11px] uppercase tracking-[0.12em] text-eve-dim">
+                            <span>Custom DoD</span>
+                            <input
+                              type="number"
+                              min="0"
+                              step="0.01"
+                              value={itemDemandDaysDrafts[item.id] ?? ""}
+                              placeholder="-"
+                              onChange={(e) => setItemDemandDaysDrafts((prev) => ({ ...prev, [item.id]: e.target.value }))}
+                              onBlur={() => void handleSubmitDemandDaysDraft(
+                                [item],
+                                itemDemandDaysDrafts[item.id] ?? "",
+                                (value) => setItemDemandDaysDrafts((prev) => ({ ...prev, [item.id]: value })),
+                              )}
+                              onKeyDown={(e) => {
+                                if (e.key === "Enter") {
+                                  e.preventDefault();
+                                  void handleSubmitDemandDaysDraft(
+                                    [item],
+                                    itemDemandDaysDrafts[item.id] ?? "",
+                                    (value) => setItemDemandDaysDrafts((prev) => ({ ...prev, [item.id]: value })),
+                                  );
+                                }
+                              }}
+                              className="w-20 px-2 py-1 bg-eve-input border border-eve-border rounded-sm text-[11px] text-eve-text"
+                            />
+                          </label>
+                          <button
+                            type="button"
+                            onClick={() => void handleDeleteItem(item.id)}
+                            className="text-[11px] uppercase tracking-[0.12em] text-eve-error hover:text-eve-error/80"
+                          >
+                            Remove
+                          </button>
+                        </div>
                       </div>
                     ))}
                   </div>
@@ -1015,11 +1745,11 @@ export function ImportExportTab({ isLoggedIn }: Props) {
                 </div>
               )}
               {routeItems.length === 0 && !analyzing ? (
-                <div className="h-full bg-eve-panel border border-eve-border rounded-sm flex items-center justify-center text-eve-dim">
+                <div className="min-h-[24rem] bg-eve-panel border border-eve-border rounded-sm flex items-center justify-center text-eve-dim">
                   Add tracked goods to see route analysis results.
                 </div>
               ) : (
-                <div className="h-full bg-eve-panel border border-eve-border rounded-sm overflow-hidden">
+                <div className="bg-eve-panel border border-eve-border rounded-sm min-h-[24rem]">
                   <div className="px-3 py-2 border-b border-eve-border/60 text-[11px] uppercase tracking-[0.12em] text-eve-dim">
                     Route jumps: <span className="text-eve-accent">{analysis?.route_jumps ?? 0}</span>
                     {" · "}
@@ -1027,8 +1757,8 @@ export function ImportExportTab({ isLoggedIn }: Props) {
                     {" · "}
                     Tracked rows: <span className="text-eve-accent">{rows.length}</span>
                   </div>
-                  <div className="h-[calc(100%-33px)] overflow-auto">
-                    <ScanResultsTable
+                  <div className="overflow-x-auto overflow-y-visible">
+                    <ImportExportResultsTable
                       results={rows}
                       scanning={analyzing}
                       progress={progress}
@@ -1040,7 +1770,7 @@ export function ImportExportTab({ isLoggedIn }: Props) {
                       sellBrokerFeePercent={routeForm.sell_broker_fee_percent}
                       buySalesTaxPercent={routeForm.buy_sales_tax_percent}
                       sellSalesTaxPercent={routeForm.sell_sales_tax_percent}
-                      showRegions
+                      showRegions={false}
                       columnProfile="region_eveguru"
                       isLoggedIn={isLoggedIn}
                       cargoLimit={1_000_000_000}
@@ -1050,11 +1780,597 @@ export function ImportExportTab({ isLoggedIn }: Props) {
                 </div>
               )}
             </div>
+              </>
+            ) : (
+              <div className="space-y-3 overflow-auto pr-1">
+                <div className="flex items-center justify-between gap-3 rounded-sm border border-eve-border bg-eve-panel px-3 py-2">
+                  <div className="text-sm text-eve-dim">
+                    {restockingStale
+                      ? "Restocking cache is stale. Refresh to rebuild warehouse, order, transit, and target stock aggregates."
+                      : "Restocking aggregates combine route targets, warehouses, transit contracts, and current orders."}
+                  </div>
+                  <button
+                    type="button"
+                    onClick={() => void loadRestocking()}
+                    disabled={savingWarehouse || savingTransit}
+                    className="px-3 py-1.5 rounded-sm border border-eve-border text-xs uppercase tracking-[0.12em] hover:bg-eve-panel-hover disabled:opacity-50"
+                  >
+                    Refresh
+                  </button>
+                </div>
+                <div className="grid grid-cols-1 xl:grid-cols-4 gap-3">
+                  <div className="rounded-sm border border-eve-border bg-eve-panel px-3 py-3">
+                    <div className="text-[11px] uppercase tracking-[0.12em] text-eve-dim">Routes</div>
+                    <div className="mt-1 text-xl text-eve-text">{routes.length}</div>
+                  </div>
+                  <div className="rounded-sm border border-eve-border bg-eve-panel px-3 py-3">
+                    <div className="text-[11px] uppercase tracking-[0.12em] text-eve-dim">Tracked Items</div>
+                    <div className="mt-1 text-xl text-eve-text">{allTrackedItems.length}</div>
+                  </div>
+                  <div className="rounded-sm border border-eve-border bg-eve-panel px-3 py-3">
+                    <div className="text-[11px] uppercase tracking-[0.12em] text-eve-dim">Warehouses</div>
+                    <div className="mt-1 text-xl text-eve-text">{warehouses.length}</div>
+                  </div>
+                  <div className="rounded-sm border border-eve-border bg-eve-panel px-3 py-3">
+                    <div className="text-[11px] uppercase tracking-[0.12em] text-eve-dim">Transit Units</div>
+                    <div className="mt-1 text-xl text-eve-text">{transitEntries.reduce((sum, entry) => sum + entry.items.reduce((itemSum, item) => itemSum + item.quantity, 0), 0)}</div>
+                  </div>
+                </div>
+
+                <TabSettingsPanel
+                  title="Warehouses"
+                  hint="Tracked storage locations"
+                  icon=""
+                  defaultExpanded
+                  persistKey="import-export-restocking-warehouses"
+                >
+                  <div className="grid grid-cols-1 xl:grid-cols-[minmax(0,1fr)_minmax(0,1fr)_auto] gap-3 items-end">
+                    <SettingsField label="System">
+                      <SystemAutocomplete
+                        value={warehouseForm.system_name}
+                        onChange={(value) => setWarehouseForm((prev) => ({
+                          ...prev,
+                          system_name: value,
+                          location_id: 0,
+                          location_name: "",
+                          is_structure: false,
+                        }))}
+                        showLocationButton={false}
+                        isLoggedIn={isLoggedIn}
+                        includeStructures={warehouseForm.include_structures}
+                        onIncludeStructuresChange={(value) => setWarehouseForm((prev) => ({
+                          ...prev,
+                          include_structures: value,
+                          location_id: 0,
+                          location_name: "",
+                          is_structure: false,
+                        }))}
+                      />
+                    </SettingsField>
+                    <SettingsField label="Station / Structure">
+                      <select
+                        value={String(warehouseForm.location_id || 0)}
+                        onChange={(e) => {
+                          const nextId = Number(e.target.value) || 0;
+                          const location = warehouseLocations.find((entry) => entry.id === nextId);
+                          setWarehouseForm((prev) => ({
+                            ...prev,
+                            location_id: nextId,
+                            location_name: location?.name ?? "",
+                            name: location?.name ?? prev.name,
+                            is_structure: Boolean(location?.is_structure),
+                          }));
+                        }}
+                        className="w-full px-3 py-1.5 bg-eve-input border border-eve-border rounded-sm text-eve-text text-sm"
+                      >
+                        <option value="0">
+                          {loadingWarehouseStations || loadingWarehouseStructures ? "Loading..." : "Select warehouse location"}
+                        </option>
+                        {warehouseLocations.map((location) => (
+                          <option key={location.id} value={location.id}>
+                            {location.name}
+                          </option>
+                        ))}
+                      </select>
+                    </SettingsField>
+                    <button
+                      type="button"
+                      onClick={() => void handleCreateWarehouse()}
+                      disabled={savingWarehouse}
+                      className="px-3 py-1.5 rounded-sm bg-eve-accent/15 text-eve-accent text-xs uppercase tracking-[0.12em] disabled:opacity-40"
+                    >
+                      Add Warehouse
+                    </button>
+                  </div>
+
+                  <div className="mt-3 space-y-2">
+                    {warehouses.length === 0 && (
+                      <div className="text-sm text-eve-dim border border-dashed border-eve-border rounded-sm p-3">
+                        No warehouses added yet.
+                      </div>
+                    )}
+                    {displayedWarehouses.map((warehouse) => {
+                      const expanded = expandedWarehouseIds.includes(warehouse.id);
+                      return (
+                        <div key={warehouse.id} className="border border-eve-border rounded-sm bg-eve-panel/40">
+                          <div className="flex items-center justify-between gap-3 px-3 py-2">
+                            <button
+                              type="button"
+                              onClick={() => setExpandedWarehouseIds((prev) => expanded ? prev.filter((id) => id !== warehouse.id) : [...prev, warehouse.id])}
+                              className="min-w-0 flex-1 text-left"
+                            >
+                              <div className="text-sm text-eve-text">{warehouse.name}</div>
+                              <div className="text-[11px] text-eve-dim">
+                                {warehouse.system_name} / {warehouse.location_name}
+                              </div>
+                            </button>
+                            <button
+                              type="button"
+                              onClick={() => void handleDeleteWarehouse(warehouse.id)}
+                              className="text-[11px] uppercase tracking-[0.12em] text-eve-error hover:text-eve-error/80"
+                            >
+                              Remove
+                            </button>
+                          </div>
+                          {expanded && (
+                            <div className="border-t border-eve-border/60 px-3 py-3">
+                              <div className="text-[11px] uppercase tracking-[0.12em] text-eve-dim mb-2">
+                                Tracked Goods Snapshot
+                              </div>
+                              <div className="grid grid-cols-1 lg:grid-cols-2 gap-2">
+                                {(warehouse.items ?? []).slice(0, 12).map((item) => (
+                                  <div key={`${warehouse.id}-${item.type_id}`} className="rounded-sm border border-eve-border px-2 py-2">
+                                    <div className="text-sm text-eve-text truncate">{item.type_name}</div>
+                                    <div className="text-[11px] text-eve-dim">
+                                      {item.quantity.toLocaleString()} units
+                                      {item.has_stock ? " in stock" : " tracked"}
+                                    </div>
+                                  </div>
+                                ))}
+                                {(!warehouse.items || warehouse.items.length === 0) && (
+                                  <div className="text-sm text-eve-dim">No tracked goods available yet.</div>
+                                )}
+                              </div>
+                            </div>
+                          )}
+                        </div>
+                      );
+                    })}
+                  </div>
+                </TabSettingsPanel>
+
+                <TabSettingsPanel
+                  title="Transit"
+                  hint="Delivery contracts"
+                  icon=""
+                  defaultExpanded
+                  persistKey="import-export-restocking-transit"
+                >
+                  <div className="grid grid-cols-1 xl:grid-cols-2 gap-3">
+                    <div className="space-y-3">
+                      <SettingsGrid cols={2}>
+                        <SettingsField label="From System">
+                          <SystemAutocomplete
+                            value={transitFrom.system_name}
+                            onChange={(value) => setTransitFrom((prev) => ({
+                              ...prev,
+                              system_name: value,
+                              location_id: 0,
+                              location_name: "",
+                              is_structure: false,
+                            }))}
+                            showLocationButton={false}
+                            isLoggedIn={isLoggedIn}
+                            includeStructures={transitFrom.include_structures}
+                            onIncludeStructuresChange={(value) => setTransitFrom((prev) => ({
+                              ...prev,
+                              include_structures: value,
+                              location_id: 0,
+                              location_name: "",
+                              is_structure: false,
+                            }))}
+                          />
+                        </SettingsField>
+                        <SettingsField label="From Station / Structure">
+                          <select
+                            value={String(transitFrom.location_id || 0)}
+                            onChange={(e) => {
+                              const nextId = Number(e.target.value) || 0;
+                              const location = transitFromLocations.find((entry) => entry.id === nextId);
+                              setTransitFrom((prev) => ({
+                                ...prev,
+                                location_id: nextId,
+                                location_name: location?.name ?? "",
+                                is_structure: Boolean(location?.is_structure),
+                              }));
+                            }}
+                            className="w-full px-3 py-1.5 bg-eve-input border border-eve-border rounded-sm text-eve-text text-sm"
+                          >
+                            <option value="0">
+                              {loadingTransitFromStations || loadingTransitFromStructures ? "Loading..." : "Select source location"}
+                            </option>
+                            {transitFromLocations.map((location) => (
+                              <option key={location.id} value={location.id}>
+                                {location.name}
+                              </option>
+                            ))}
+                          </select>
+                        </SettingsField>
+                        <SettingsField label="To System">
+                          <SystemAutocomplete
+                            value={transitTo.system_name}
+                            onChange={(value) => setTransitTo((prev) => ({
+                              ...prev,
+                              system_name: value,
+                              location_id: 0,
+                              location_name: "",
+                              is_structure: false,
+                            }))}
+                            showLocationButton={false}
+                            isLoggedIn={isLoggedIn}
+                            includeStructures={transitTo.include_structures}
+                            onIncludeStructuresChange={(value) => setTransitTo((prev) => ({
+                              ...prev,
+                              include_structures: value,
+                              location_id: 0,
+                              location_name: "",
+                              is_structure: false,
+                            }))}
+                          />
+                        </SettingsField>
+                        <SettingsField label="To Station / Structure">
+                          <select
+                            value={String(transitTo.location_id || 0)}
+                            onChange={(e) => {
+                              const nextId = Number(e.target.value) || 0;
+                              const location = transitToLocations.find((entry) => entry.id === nextId);
+                              setTransitTo((prev) => ({
+                                ...prev,
+                                location_id: nextId,
+                                location_name: location?.name ?? "",
+                                is_structure: Boolean(location?.is_structure),
+                              }));
+                            }}
+                            className="w-full px-3 py-1.5 bg-eve-input border border-eve-border rounded-sm text-eve-text text-sm"
+                          >
+                            <option value="0">
+                              {loadingTransitToStations || loadingTransitToStructures ? "Loading..." : "Select destination location"}
+                            </option>
+                            {transitToLocations.map((location) => (
+                              <option key={location.id} value={location.id}>
+                                {location.name}
+                              </option>
+                            ))}
+                          </select>
+                        </SettingsField>
+                      </SettingsGrid>
+
+                      <div className="rounded-sm border border-eve-border/70 bg-eve-panel/30 p-3 space-y-3">
+                        <div className="flex items-center justify-between gap-3">
+                          <div className="text-[11px] uppercase tracking-[0.12em] text-eve-dim">Add Items</div>
+                          <div className="flex items-center gap-1">
+                            <button
+                              type="button"
+                              onClick={() => setTransitDraftMode("search")}
+                              className={cn(
+                                "px-2 py-1 rounded-sm text-[11px] uppercase tracking-[0.12em] border",
+                                transitDraftMode === "search"
+                                  ? "border-eve-accent bg-eve-accent/15 text-eve-accent"
+                                  : "border-eve-border text-eve-dim",
+                              )}
+                            >
+                              Search
+                            </button>
+                            <button
+                              type="button"
+                              onClick={() => setTransitDraftMode("clipboard")}
+                              className={cn(
+                                "px-2 py-1 rounded-sm text-[11px] uppercase tracking-[0.12em] border",
+                                transitDraftMode === "clipboard"
+                                  ? "border-eve-accent bg-eve-accent/15 text-eve-accent"
+                                  : "border-eve-border text-eve-dim",
+                              )}
+                            >
+                              Clipboard
+                            </button>
+                          </div>
+                        </div>
+
+                        {transitDraftMode === "search" ? (
+                          <div className="grid grid-cols-1 xl:grid-cols-[minmax(0,1fr)_120px_auto] gap-3 items-end">
+                            <div className="relative">
+                              <div className="text-[11px] uppercase tracking-[0.12em] text-eve-dim mb-1">Transit Item</div>
+                              <input
+                                value={transitItemQuery}
+                                onChange={(e) => runTransitItemSearch(e.target.value)}
+                                onFocus={() => transitItemResults.length > 0 && setTransitItemOpen(true)}
+                                placeholder="Search tracked or market item"
+                                className="w-full px-3 py-1.5 bg-eve-input border border-eve-border rounded-sm text-eve-text text-sm"
+                              />
+                              {transitItemOpen && transitItemResults.length > 0 && (
+                                <div className="absolute z-50 top-full left-0 right-0 mt-1 bg-eve-panel border border-eve-border rounded-sm shadow-eve-glow max-h-64 overflow-y-auto">
+                                  {transitItemResults.map((item) => (
+                                    <button
+                                      key={item.type_id}
+                                      type="button"
+                                      onClick={() => {
+                                        setSelectedTransitItem(item);
+                                        setTransitItemQuery(item.type_name);
+                                        setTransitItemOpen(false);
+                                      }}
+                                      className="w-full text-left px-3 py-2 hover:bg-eve-panel-hover"
+                                    >
+                                      <div className="text-sm text-eve-text">{item.type_name}</div>
+                                      <div className="text-[11px] text-eve-dim">{item.group_name || "Ungrouped"}</div>
+                                    </button>
+                                  ))}
+                                </div>
+                              )}
+                            </div>
+                            <SettingsField label="Quantity">
+                              <SettingsNumberInput
+                                value={transitItemQuantity}
+                                onChange={setTransitItemQuantity}
+                                min={1}
+                                max={1000000000}
+                                step={1}
+                              />
+                            </SettingsField>
+                            <button
+                              type="button"
+                              onClick={handleAddTransitDraftItem}
+                              disabled={!selectedTransitItem || savingTransit}
+                              className="px-3 py-1.5 rounded-sm bg-eve-accent/15 text-eve-accent text-xs uppercase tracking-[0.12em] disabled:opacity-40"
+                            >
+                              Add Item
+                            </button>
+                          </div>
+                        ) : (
+                          <div className="space-y-2">
+                            <div className="text-[11px] text-eve-dim">
+                              Paste item lines like: <span className="text-eve-text">Astero x 2Nocxium x 100000Magnate x 200</span>
+                            </div>
+                            <textarea
+                              value={transitClipboardText}
+                              onChange={(e) => setTransitClipboardText(e.target.value)}
+                              rows={5}
+                              className="w-full px-3 py-2 bg-eve-input border border-eve-border rounded-sm text-eve-text text-sm"
+                            />
+                            <button
+                              type="button"
+                              onClick={handleImportTransitClipboard}
+                              disabled={!transitClipboardText.trim()}
+                              className="px-3 py-1.5 rounded-sm bg-eve-accent/15 text-eve-accent text-xs uppercase tracking-[0.12em] disabled:opacity-40"
+                            >
+                              Parse Clipboard
+                            </button>
+                          </div>
+                        )}
+                      </div>
+
+                      <div className="space-y-2">
+                        <div className="text-[11px] uppercase tracking-[0.12em] text-eve-dim">Draft Contract Items</div>
+                        {transitDraftItems.length === 0 ? (
+                          <div className="text-sm text-eve-dim border border-dashed border-eve-border rounded-sm p-3">
+                            No items added to this delivery contract yet.
+                          </div>
+                        ) : (
+                          transitDraftItems.map((item) => (
+                            <div key={item.type_id} className="flex items-center justify-between gap-3 border border-eve-border rounded-sm px-3 py-2 bg-eve-panel/40">
+                              <div>
+                                <div className="text-sm text-eve-text">{item.type_name}</div>
+                                <div className="text-[11px] text-eve-dim">{item.quantity.toLocaleString()} units</div>
+                              </div>
+                              <button
+                                type="button"
+                                onClick={() => setTransitDraftItems((prev) => prev.filter((entry) => entry.type_id !== item.type_id))}
+                                className="text-[11px] uppercase tracking-[0.12em] text-eve-error hover:text-eve-error/80"
+                              >
+                                Remove
+                              </button>
+                            </div>
+                          ))
+                        )}
+                      </div>
+
+                      <button
+                        type="button"
+                        onClick={() => void handleCreateTransitEntry()}
+                        disabled={savingTransit}
+                        className="px-3 py-1.5 rounded-sm bg-eve-accent/15 text-eve-accent text-xs uppercase tracking-[0.12em] disabled:opacity-40"
+                      >
+                        Create Delivery Contract
+                      </button>
+                    </div>
+
+                    <div className="space-y-2">
+                      {transitEntries.length === 0 && (
+                        <div className="text-sm text-eve-dim border border-dashed border-eve-border rounded-sm p-3">
+                          No delivery contracts recorded yet.
+                        </div>
+                      )}
+                      {(restockingOverview?.transit ?? transitEntries).map((entry) => (
+                        <div key={entry.id} className="border border-eve-border rounded-sm px-3 py-2 bg-eve-panel/40">
+                          <div className="flex items-start justify-between gap-3">
+                            <div className="min-w-0">
+                              <div className="text-[11px] text-eve-dim">
+                                {entry.from_system_name} / {entry.from_location_name}
+                              </div>
+                              <div className="text-[11px] text-eve-dim">
+                                {entry.to_system_name} / {entry.to_location_name}
+                              </div>
+                              <div className="mt-2 space-y-1">
+                                {(entry.items ?? []).map((item) => (
+                                  <div key={`${entry.id}-${item.type_id}`} className="text-sm text-eve-text">
+                                    {item.type_name} <span className="text-eve-dim">x {item.quantity.toLocaleString()}</span>
+                                  </div>
+                                ))}
+                              </div>
+                            </div>
+                            <div className="flex items-center gap-3">
+                              <button
+                                type="button"
+                                onClick={() => void handleDeleteTransitEntry(entry.id)}
+                                className="text-[11px] uppercase tracking-[0.12em] text-eve-error hover:text-eve-error/80"
+                              >
+                                Remove
+                              </button>
+                            </div>
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                </TabSettingsPanel>
+
+                <TabSettingsPanel
+                  title="Orders"
+                  hint="Tracked goods across characters"
+                  icon=""
+                  defaultExpanded
+                  persistKey="import-export-restocking-orders"
+                >
+                  <div className="space-y-2 max-h-80 overflow-auto pr-1">
+                    {restockingStale && !restockingOverview && (
+                      <div className="text-sm text-eve-warning border border-dashed border-eve-warning/40 rounded-sm p-3">
+                        Order aggregation is stale. Click Refresh to rebuild the restocking view.
+                      </div>
+                    )}
+                    {(restockingOverview?.orders ?? []).length === 0 && (
+                      <div className="text-sm text-eve-dim border border-dashed border-eve-border rounded-sm p-3">
+                        No tracked-item orders found.
+                      </div>
+                    )}
+                    {(restockingOverview?.orders ?? []).map((order) => (
+                      <div key={`${order.character_id}-${order.order_id}`} className="border border-eve-border rounded-sm px-3 py-2 bg-eve-panel/40">
+                        <div className="flex items-start justify-between gap-3">
+                          <div className="min-w-0">
+                            <div className="text-sm text-eve-text">{order.type_name}</div>
+                            <div className="text-[11px] text-eve-dim">
+                              {order.is_buy_order ? "Buy" : "Sell"} · {order.volume_remain.toLocaleString()} / {order.volume_total.toLocaleString()} @ {order.price.toLocaleString()}
+                            </div>
+                            <div className="text-[11px] text-eve-dim">
+                              {order.character_name} · {order.location_name || `#${order.location_id}`}
+                            </div>
+                          </div>
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                </TabSettingsPanel>
+
+                <TabSettingsPanel
+                  title="Restock Table"
+                  hint="Aggregated stock posture"
+                  icon=""
+                  defaultExpanded
+                  persistKey="import-export-restocking-table"
+                >
+                  <div className="overflow-auto">
+                    <table className="min-w-full text-sm">
+                      <thead>
+                        <tr className="text-[11px] uppercase tracking-[0.12em] text-eve-dim border-b border-eve-border/60">
+                          <th className="px-3 py-2 text-left">Item</th>
+                          <th className="px-3 py-2 text-right">Target</th>
+                          <th className="px-3 py-2 text-right">Warehouse</th>
+                          <th className="px-3 py-2 text-right">Transit</th>
+                          <th className="px-3 py-2 text-right">Buy</th>
+                          <th className="px-3 py-2 text-right">Sell</th>
+                          <th className="px-3 py-2 text-right">Net</th>
+                          <th className="px-3 py-2 text-right">Move</th>
+                          <th className="px-3 py-2 text-right">Buy</th>
+                          <th className="px-3 py-2 text-right">Restock</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {restockingStale && !restockingOverview && (
+                          <tr>
+                            <td colSpan={10} className="px-3 py-4 text-sm text-eve-warning">
+                              Restocking data is stale. Click Refresh to rebuild warehouse, order, transit, and target stock totals.
+                            </td>
+                          </tr>
+                        )}
+                        {(restockingOverview?.items ?? []).map((item) => (
+                          <Fragment key={item.type_id}>
+                            <tr key={item.type_id} className="border-b border-eve-border/40">
+                              <td className="px-3 py-2">
+                                <div className="text-eve-text">{item.type_name}</div>
+                                <div className="text-[11px] text-eve-dim">
+                                  {item.route_refs} routes · {item.aggregated_demand_per_day.toFixed(1)} demand/day · {item.effective_demand_days_average.toFixed(2)} DoD
+                                </div>
+                              </td>
+                              <td className="px-3 py-2 text-right">{item.target_stock.toLocaleString()}</td>
+                              <td className="px-3 py-2 text-right">{item.warehouse_stock.toLocaleString()}</td>
+                              <td className="px-3 py-2 text-right">{item.transit_stock.toLocaleString()}</td>
+                              <td className="px-3 py-2 text-right">{item.buy_order_qty.toLocaleString()}</td>
+                              <td className="px-3 py-2 text-right">{item.sell_order_qty.toLocaleString()}</td>
+                              <td className="px-3 py-2 text-right">{item.net_available.toLocaleString()}</td>
+                              <td className="px-3 py-2 text-right text-eve-accent">{item.suggested_move_qty.toLocaleString()}</td>
+                              <td className="px-3 py-2 text-right text-eve-accent">{item.suggested_buy_qty.toLocaleString()}</td>
+                              <td className="px-3 py-2 text-right text-eve-accent">{item.restock_needed.toLocaleString()}</td>
+                            </tr>
+                            {item.route_breakdowns.length > 0 && (
+                              <tr className="border-b border-eve-border/40 bg-eve-panel/30">
+                                <td colSpan={10} className="px-3 py-3">
+                                  <div className="text-[11px] uppercase tracking-[0.12em] text-eve-dim mb-2">Route Allocation</div>
+                                  <div className="grid grid-cols-1 xl:grid-cols-2 gap-2">
+                                    {item.route_breakdowns.map((route) => (
+                                      <div key={`${item.type_id}-${route.route_id}`} className="rounded-sm border border-eve-border px-2 py-2">
+                                        <div className="text-sm text-eve-text">
+                                          {route.route_name}
+                                          {route.target_location_name ? ` / ${route.target_location_name}` : ` / ${route.target_system_name}`}
+                                        </div>
+                                        <div className="text-[11px] text-eve-dim">
+                                          Target {route.target_stock.toLocaleString()} · Demand {route.demand_per_day.toFixed(1)}/day · {route.effective_demand_days.toFixed(2)} DoD
+                                        </div>
+                                        <div className="text-[11px] text-eve-dim">
+                                          Destination stock {route.destination_stock.toLocaleString()} · Sell orders {route.destination_sell_qty.toLocaleString()}
+                                        </div>
+                                        <div className="text-[11px] text-eve-accent">
+                                          Route deficit {route.route_deficit.toLocaleString()} · Move {route.suggested_haul_qty.toLocaleString()} · Buy {route.suggested_buy_qty.toLocaleString()}
+                                        </div>
+                                        {route.transfer_suggestions.length > 0 && (
+                                          <div className="mt-1 text-[11px] text-eve-dim">
+                                            {route.transfer_suggestions.map((suggestion) => (
+                                              <div key={`${route.route_id}-${suggestion.warehouse_id}`}>
+                                                Pull {suggestion.quantity.toLocaleString()} from {suggestion.warehouse_name} ({suggestion.location_name})
+                                              </div>
+                                            ))}
+                                          </div>
+                                        )}
+                                      </div>
+                                    ))}
+                                  </div>
+                                </td>
+                              </tr>
+                            )}
+                          </Fragment>
+                        ))}
+                        {(restockingOverview?.items ?? []).length === 0 && (
+                          <tr>
+                            <td colSpan={10} className="px-3 py-4 text-sm text-eve-dim">
+                              No aggregated restocking rows yet.
+                            </td>
+                          </tr>
+                        )}
+                      </tbody>
+                    </table>
+                  </div>
+                </TabSettingsPanel>
+              </div>
+            )}
           </>
         )}
       </section>
 
-      <Modal open={createModalOpen} onClose={closeCreateModal} title="Create Import / Export Route" width="max-w-lg">
+      </div>
+
+      <Modal
+        open={createModalOpen}
+        onClose={closeCreateModal}
+        title={routeModalMode === "edit" ? "Edit Import / Export Route" : "Create Import / Export Route"}
+        width="max-w-lg"
+      >
         <div className="p-4 space-y-4 overflow-auto max-h-[70vh]">
           {error && (
             <div className="rounded-sm border border-eve-error/40 bg-eve-error/10 px-3 py-2 text-sm text-eve-error">
@@ -1135,7 +2451,7 @@ export function ImportExportTab({ isLoggedIn }: Props) {
           <div className="flex justify-end">
             <button
               type="button"
-              onClick={handleCreateRoute}
+              onClick={handleSubmitRoute}
               disabled={
                 savingRoute ||
                 createLoadingStations ||
@@ -1146,7 +2462,7 @@ export function ImportExportTab({ isLoggedIn }: Props) {
               }
               className="px-4 py-2 rounded-sm bg-eve-accent text-eve-dark text-xs uppercase tracking-[0.12em] disabled:opacity-40"
             >
-              Create
+              {routeModalMode === "edit" ? "Save" : "Create"}
             </button>
           </div>
         </div>

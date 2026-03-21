@@ -305,7 +305,7 @@ func (s *Scanner) importExportCalculateResults(
 			if len(destSells) == 0 {
 				continue
 			}
-		} else if len(destBuys) == 0 {
+		} else if len(destBuys) == 0 && targetMarketSystemID <= 0 && targetMarketLocationID <= 0 {
 			continue
 		}
 
@@ -478,7 +478,15 @@ func (s *Scanner) importExportCalculateResults(
 			}
 		}
 		if destLocID <= 0 || destinationPrice <= 0 {
-			continue
+			if !useSellOrderRevenue && (targetMarketSystemID > 0 || targetMarketLocationID > 0) {
+				destLocID = targetMarketLocationID
+				destinationPrice = 0
+				destinationVolume = 0
+				destinationSystemID = targetMarketSystemID
+				destinationOrderCount = 0
+			} else {
+				continue
+			}
 		}
 		if sourceLocID == destLocID {
 			continue
@@ -704,8 +712,12 @@ func (s *Scanner) importExportRowsForMode(
 			continue
 		}
 		history := historyByType[row.TypeID]
+		rowParams := params
+		if meta.CustomPurchaseDemandDays != nil {
+			rowParams.PurchaseDemandDays = *meta.CustomPurchaseDemandDays
+		}
 		enriched, ok := s.importExportEnrichRow(
-			params,
+			rowParams,
 			row,
 			history,
 			buyCostMult,

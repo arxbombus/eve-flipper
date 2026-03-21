@@ -44,7 +44,11 @@ export function PnLTab({ formatIsk, characterScope, t }: PnLTabProps) {
     return <div className="flex items-center justify-center h-full text-eve-error text-xs">{error}</div>;
   }
 
-  if (!data || data.daily_pnl.length === 0) {
+  const dailyPnL = data?.daily_pnl ?? [];
+  const topItems = data?.top_items ?? [];
+  const topStations = data?.top_stations ?? [];
+
+  if (!data || dailyPnL.length === 0) {
     return (
       <div className="flex flex-col items-center justify-center h-full text-eve-dim text-xs space-y-2">
         <div>{t("pnlNoData")}</div>
@@ -56,8 +60,8 @@ export function PnLTab({ formatIsk, characterScope, t }: PnLTabProps) {
   const { summary } = data;
 
   // Separate top items into profit and loss
-  const profitItems = data.top_items.filter((item) => item.net_pnl > 0).sort((a, b) => b.net_pnl - a.net_pnl);
-  const lossItems = data.top_items.filter((item) => item.net_pnl < 0).sort((a, b) => a.net_pnl - b.net_pnl);
+  const profitItems = topItems.filter((item) => item.net_pnl > 0).sort((a, b) => b.net_pnl - a.net_pnl);
+  const lossItems = topItems.filter((item) => item.net_pnl < 0).sort((a, b) => a.net_pnl - b.net_pnl);
 
   return (
     <div className="space-y-4">
@@ -250,7 +254,7 @@ export function PnLTab({ formatIsk, characterScope, t }: PnLTabProps) {
             </button>
           </div>
         </div>
-        <PnLChart data={data.daily_pnl} mode={chartMode} formatIsk={formatIsk} />
+        <PnLChart data={dailyPnL} mode={chartMode} formatIsk={formatIsk} />
       </div>
 
       {/* Top Items / Station Breakdown */}
@@ -275,7 +279,7 @@ export function PnLTab({ formatIsk, characterScope, t }: PnLTabProps) {
                   : "bg-eve-dark border-eve-border text-eve-dim hover:text-eve-text"
               }`}
             >
-              {t("pnlStationBreakdown")} ({data.top_stations?.length ?? 0})
+              {t("pnlStationBreakdown")} ({topStations.length})
             </button>
           </div>
           {bottomView === "items" && (
@@ -311,7 +315,7 @@ export function PnLTab({ formatIsk, characterScope, t }: PnLTabProps) {
           />
         ) : (
           <PnLStationsTable
-            stations={data.top_stations ?? []}
+            stations={topStations}
             formatIsk={formatIsk}
             t={t}
           />
@@ -800,4 +804,3 @@ function PnLOpenPositionsTable({
 }
 
 // --- Optimizer Tab ---
-

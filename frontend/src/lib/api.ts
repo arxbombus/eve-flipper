@@ -20,7 +20,10 @@ import type {
   HotZonesResponse,
   ImportExportRoute,
   ImportExportRouteAnalysis,
+  ImportExportRestockingOverview,
   ImportExportRouteItem,
+  ImportExportTransitEntry,
+  ImportExportWarehouse,
   IndustryJob,
   IndustryJobStatus,
   IndustryLedger,
@@ -377,10 +380,30 @@ export async function deleteImportExportRoute(routeId: number): Promise<{ ok: bo
 
 export async function addImportExportRouteItem(
   routeId: number,
-  payload: { type_id: number; type_name: string; category_id: number; group_id: number; group_name: string },
+  payload: {
+    type_id: number;
+    type_name: string;
+    category_id: number;
+    group_id: number;
+    group_name: string;
+    custom_purchase_demand_days?: number | null;
+  },
 ): Promise<ImportExportRouteItem> {
   const res = await apiFetch(`${BASE}/api/import-export/routes/${routeId}/items`, {
     method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+  });
+  return handleResponse<ImportExportRouteItem>(res);
+}
+
+export async function updateImportExportRouteItem(
+  routeId: number,
+  itemId: number,
+  payload: { custom_purchase_demand_days: number | null },
+): Promise<ImportExportRouteItem> {
+  const res = await apiFetch(`${BASE}/api/import-export/routes/${routeId}/items/${itemId}`, {
+    method: "PUT",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(payload),
   });
@@ -397,6 +420,97 @@ export async function deleteImportExportRouteItem(routeId: number, itemId: numbe
 export async function analyzeImportExportRoute(routeId: number): Promise<ImportExportRouteAnalysis> {
   const res = await apiFetch(`${BASE}/api/import-export/routes/${routeId}/analysis`);
   return handleResponse<ImportExportRouteAnalysis>(res);
+}
+
+export async function getImportExportWarehouses(): Promise<ImportExportWarehouse[]> {
+  const res = await apiFetch(`${BASE}/api/import-export/warehouses`);
+  return handleResponse<ImportExportWarehouse[]>(res);
+}
+
+export async function createImportExportWarehouse(payload: {
+  name: string;
+  system_id: number;
+  system_name: string;
+  location_id: number;
+  location_name: string;
+  is_structure: boolean;
+}): Promise<ImportExportWarehouse> {
+  const res = await apiFetch(`${BASE}/api/import-export/warehouses`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+  });
+  return handleResponse<ImportExportWarehouse>(res);
+}
+
+export async function deleteImportExportWarehouse(warehouseId: number): Promise<{ ok: boolean }> {
+  const res = await apiFetch(`${BASE}/api/import-export/warehouses/${warehouseId}`, {
+    method: "DELETE",
+  });
+  return handleResponse<{ ok: boolean }>(res);
+}
+
+export async function getImportExportTransitEntries(): Promise<ImportExportTransitEntry[]> {
+  const res = await apiFetch(`${BASE}/api/import-export/transit`);
+  const entries = await handleResponse<ImportExportTransitEntry[]>(res);
+  return (entries ?? []).map((entry) => ({
+    ...entry,
+    items: entry.items ?? [],
+  }));
+}
+
+export async function getImportExportRestockingOverview(): Promise<ImportExportRestockingOverview> {
+  const res = await apiFetch(`${BASE}/api/import-export/restocking/overview`);
+  const data = await handleResponse<ImportExportRestockingOverview>(res);
+  return {
+    ...data,
+    warehouses: (data.warehouses ?? []).map((warehouse) => ({
+      ...warehouse,
+      items: warehouse.items ?? [],
+    })),
+    orders: data.orders ?? [],
+    transit: (data.transit ?? []).map((entry) => ({
+      ...entry,
+      items: entry.items ?? [],
+    })),
+    items: (data.items ?? []).map((item) => ({
+      ...item,
+      route_breakdowns: (item.route_breakdowns ?? []).map((route) => ({
+        ...route,
+        transfer_suggestions: route.transfer_suggestions ?? [],
+      })),
+    })),
+  };
+}
+
+export async function createImportExportTransitEntry(payload: {
+  from_system_id: number;
+  from_system_name: string;
+  from_location_id: number;
+  from_location_name: string;
+  to_system_id: number;
+  to_system_name: string;
+  to_location_id: number;
+  to_location_name: string;
+  items: { type_id: number; type_name: string; quantity: number }[];
+}): Promise<ImportExportTransitEntry> {
+  const res = await apiFetch(`${BASE}/api/import-export/transit`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+  });
+  const entry = await handleResponse<ImportExportTransitEntry>(res);
+  return {
+    ...entry,
+    items: entry.items ?? [],
+  };
+}
+
+export async function deleteImportExportTransitEntry(entryId: number): Promise<{ ok: boolean }> {
+  const res = await apiFetch(`${BASE}/api/import-export/transit/${entryId}`, {
+    method: "DELETE",
+  });
+  return handleResponse<{ ok: boolean }>(res);
 }
 
 export async function scan(
@@ -1293,7 +1407,13 @@ export async function getCharacterInfo(characterId?: CharacterScope): Promise<Ch
   appendCharacterScope(params, characterId);
   const query = params.toString();
   const res = await apiFetch(`${BASE}/api/auth/character${query ? `?${query}` : ""}`);
-  return handleResponse<CharacterInfo>(res);
+  const data = await handleResponse<CharacterInfo>(res);
+  return {
+    ...data,
+    orders: data.orders ?? [],
+    order_history: data.order_history ?? [],
+    transactions: data.transactions ?? [],
+  };
 }
 
 export interface CharacterLocation {
@@ -1400,7 +1520,15 @@ export async function getPortfolioPnL(days: number = 30, params?: PortfolioPnLPa
   if (params?.ledgerLimit != null) qp.set("ledger_limit", String(params.ledgerLimit));
   appendCharacterScope(qp, params?.characterId);
   const res = await apiFetch(`${BASE}/api/auth/portfolio?${qp.toString()}`);
-  return handleResponse<PortfolioPnL>(res);
+  const data = await handleResponse<PortfolioPnL>(res);
+  return {
+    ...data,
+    daily_pnl: data.daily_pnl ?? [],
+    top_items: data.top_items ?? [],
+    top_stations: data.top_stations ?? [],
+    ledger: data.ledger ?? [],
+    open_positions: data.open_positions ?? [],
+  };
 }
 
 export type OptimizerResult =
