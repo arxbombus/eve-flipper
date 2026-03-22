@@ -27,6 +27,7 @@ import type {
   ImportExportRouteAnalysis,
   ImportExportRouteItem,
   ImportExportRestockingOverview,
+  ImportExportRestockingItemSummary,
   ImportExportTransitItem,
   ImportExportTransitEntry,
   ImportExportWarehouse,
@@ -59,6 +60,10 @@ type Props = {
 
 type GoodsSortMode = "name_asc" | "name_desc" | "category" | "group" | "recent";
 type GoodsGroupMode = "none" | "category" | "group";
+type TrackedGoodsFilterMode = "all" | "custom" | "route_default";
+type RestockFilterMode = "all" | "buy" | "move" | "transit" | "orders" | "healthy";
+type RestockSortMode = "restock_desc" | "buy_desc" | "move_desc" | "demand_desc" | "name_asc";
+type RestockGroupMode = "none" | "action" | "route_refs";
 type ImportExportSubtab = "routes" | "restocking";
 
 type RouteFormState = {
@@ -224,6 +229,26 @@ function parseTransitClipboard(raw: string) {
     .filter((entry) => entry.type_name.length > 0 && Number.isFinite(entry.quantity) && entry.quantity > 0);
 }
 
+function normalizeItemName(raw: string) {
+  return raw.replace(/\s+/g, " ").trim().toLowerCase();
+}
+
+function parseTrackedGoodsClipboard(raw: string) {
+  return raw
+    .split(/[,\n]/)
+    .map((entry) => entry.trim())
+    .filter((entry) => entry.length > 0);
+}
+
+function restockActionLabel(item: ImportExportRestockingItemSummary) {
+  if (item.suggested_buy_qty > 0 && item.suggested_move_qty > 0) return "Buy + Move";
+  if (item.suggested_buy_qty > 0) return "Buy Required";
+  if (item.suggested_move_qty > 0) return "Move Only";
+  if (item.transit_stock > 0) return "Covered by Transit";
+  if (item.buy_order_qty > 0 || item.sell_order_qty > 0) return "Covered by Orders";
+  return "Healthy";
+}
+
 export function ImportExportTab({ isLoggedIn }: Props) {
   const [routes, setRoutes] = useState<ImportExportRoute[]>([]);
   const [selectedRouteId, setSelectedRouteId] = useState<number | null>(null);
@@ -251,6 +276,12 @@ export function ImportExportTab({ isLoggedIn }: Props) {
   const [activeSubtab, setActiveSubtab] = useState<ImportExportSubtab>("routes");
   const [restockingOverview, setRestockingOverview] = useState<ImportExportRestockingOverview | null>(null);
   const [restockingStale, setRestockingStale] = useState(false);
+  const [restockQuery, setRestockQuery] = useState("");
+  const [restockFilter, setRestockFilter] = useState<RestockFilterMode>("all");
+  const [restockSort, setRestockSort] = useState<RestockSortMode>("restock_desc");
+  const [restockGroup, setRestockGroup] = useState<RestockGroupMode>("none");
+  const [collapsedRestockGroupKeys, setCollapsedRestockGroupKeys] = useState<string[]>([]);
+  const [selectedRestockTypeID, setSelectedRestockTypeID] = useState<number | null>(null);
   const [warehouses, setWarehouses] = useState<ImportExportWarehouse[]>([]);
   const [transitEntries, setTransitEntries] = useState<ImportExportTransitEntry[]>([]);
   const [warehouseForm, setWarehouseForm] = useState<WarehouseFormState>(DEFAULT_WAREHOUSE_FORM);
@@ -263,6 +294,12 @@ export function ImportExportTab({ isLoggedIn }: Props) {
   const [allDemandDaysDraft, setAllDemandDaysDraft] = useState("");
   const [groupDemandDaysDrafts, setGroupDemandDaysDrafts] = useState<Record<string, string>>({});
   const [itemDemandDaysDrafts, setItemDemandDaysDrafts] = useState<Record<number, string>>({});
+  const [trackedGoodsQuery, setTrackedGoodsQuery] = useState("");
+  const [trackedGoodsFilter, setTrackedGoodsFilter] = useState<TrackedGoodsFilterMode>("all");
+  const [bulkDemandDaysDraft, setBulkDemandDaysDraft] = useState("");
+  const [selectedTrackedItemIds, setSelectedTrackedItemIds] = useState<number[]>([]);
+  const [trackedGoodsClipboardText, setTrackedGoodsClipboardText] = useState("");
+  const [collapsedTrackedGroupKeys, setCollapsedTrackedGroupKeys] = useState<string[]>([]);
   const [transitFrom, setTransitFrom] = useState<TransitEndpointState>(DEFAULT_TRANSIT_ENDPOINT);
   const [transitTo, setTransitTo] = useState<TransitEndpointState>(DEFAULT_TRANSIT_ENDPOINT);
   const [transitFromStations, setTransitFromStations] = useState<StationInfo[]>([]);
@@ -363,6 +400,86 @@ export function ImportExportTab({ isLoggedIn }: Props) {
   const displayedWarehouses = useMemo(
     () => restockingOverview?.warehouses ?? warehouses.map((warehouse) => ({ ...warehouse, items: [] })),
     [restockingOverview, warehouses],
+  );
+  const restockingItems = useMemo(() => restockingOverview?.items ?? [], [restockingOverview]);
+  const restockStats = useMemo(() => ({
+    total: restockingItems.length,
+    buy: restockingItems.filter((item) => item.suggested_buy_qty > 0).length,
+    move: restockingItems.filter((item) => item.suggested_move_qty > 0).length,
+    healthy: restockingItems.filter((item) => item.suggested_buy_qty === 0 && item.suggested_move_qty === 0 && item.restock_needed === 0).length,
+  }), [restockingItems]);
+  const filteredRestockingItems = useMemo(() => {
+    const query = restockQuery.trim().toLowerCase();
+    const next = restockingItems.filter((item) => {
+      const matchesQuery = query === ""
+        || item.type_name.toLowerCase().includes(query)
+        || restockActionLabel(item).toLowerCase().includes(query);
+      const matchesFilter = restockFilter === "all"
+        || (restockFilter === "buy" && item.suggested_buy_qty > 0)
+        || (restockFilter === "move" && item.suggested_move_qty > 0)
+        || (restockFilter === "transit" && item.transit_stock > 0)
+        || (restockFilter === "orders" && (item.buy_order_qty > 0 || item.sell_order_qty > 0))
+        || (restockFilter === "healthy" && item.suggested_buy_qty === 0 && item.suggested_move_qty === 0 && item.restock_needed === 0);
+      return matchesQuery && matchesFilter;
+    });
+
+    next.sort((a, b) => {
+      switch (restockSort) {
+        case "buy_desc":
+          return b.suggested_buy_qty - a.suggested_buy_qty || a.type_name.localeCompare(b.type_name);
+        case "move_desc":
+          return b.suggested_move_qty - a.suggested_move_qty || a.type_name.localeCompare(b.type_name);
+        case "demand_desc":
+          return b.aggregated_demand_per_day - a.aggregated_demand_per_day || a.type_name.localeCompare(b.type_name);
+        case "name_asc":
+          return a.type_name.localeCompare(b.type_name);
+        default:
+          return b.restock_needed - a.restock_needed || b.suggested_buy_qty - a.suggested_buy_qty || a.type_name.localeCompare(b.type_name);
+      }
+    });
+
+    return next;
+  }, [restockFilter, restockQuery, restockSort, restockingItems]);
+  const groupedRestockingItems = useMemo(() => {
+    if (restockGroup === "none") {
+      return [{ key: "all", label: "", items: filteredRestockingItems }];
+    }
+    const groups = new Map<string, typeof filteredRestockingItems>();
+    for (const item of filteredRestockingItems) {
+      const label = restockGroup === "action"
+        ? restockActionLabel(item)
+        : item.route_refs > 3 ? "4+ Routes" : `${item.route_refs} Route${item.route_refs === 1 ? "" : "s"}`;
+      const existing = groups.get(label) ?? [];
+      existing.push(item);
+      groups.set(label, existing);
+    }
+    return Array.from(groups.entries()).map(([label, items]) => ({ key: label, label, items }));
+  }, [filteredRestockingItems, restockGroup]);
+  const selectedRestockItem = useMemo(
+    () => restockingItems.find((item) => item.type_id === selectedRestockTypeID) ?? null,
+    [restockingItems, selectedRestockTypeID],
+  );
+  const selectedRestockOrders = useMemo(
+    () => (restockingOverview?.orders ?? []).filter((order) => order.type_id === selectedRestockTypeID),
+    [restockingOverview, selectedRestockTypeID],
+  );
+  const selectedRestockWarehouses = useMemo(
+    () => displayedWarehouses
+      .map((warehouse) => ({
+        warehouse,
+        stock: warehouse.items.find((item) => item.type_id === selectedRestockTypeID) ?? null,
+      }))
+      .filter((entry) => entry.stock != null),
+    [displayedWarehouses, selectedRestockTypeID],
+  );
+  const selectedRestockTransit = useMemo(
+    () => (restockingOverview?.transit ?? transitEntries)
+      .map((entry) => ({
+        entry,
+        items: (entry.items ?? []).filter((item) => item.type_id === selectedRestockTypeID),
+      }))
+      .filter((entry) => entry.items.length > 0),
+    [restockingOverview, selectedRestockTypeID, transitEntries],
   );
 
   const loadRoutes = useCallback(async (preferredRouteId?: number | null) => {
@@ -880,29 +997,93 @@ export function ImportExportTab({ isLoggedIn }: Props) {
     }, 200);
   }, []);
 
+  const addTrackedItems = useCallback(async (items: ItemSearchResult[]) => {
+    if (!selectedRoute || items.length === 0) return;
+    await Promise.all(
+      items.map((item) => addImportExportRouteItem(selectedRoute.id, {
+        type_id: item.type_id,
+        type_name: item.type_name,
+        category_id: item.category_id,
+        group_id: item.group_id,
+        group_name: item.group_name,
+      })),
+    );
+    await loadRoutes(selectedRoute.id);
+  }, [loadRoutes, selectedRoute]);
+
   const handleAddItem = useCallback(async () => {
     if (!selectedRoute || !selectedItem) return;
     setMutatingItems(true);
     setError("");
     try {
-      await addImportExportRouteItem(selectedRoute.id, {
-        type_id: selectedItem.type_id,
-        type_name: selectedItem.type_name,
-        category_id: selectedItem.category_id,
-        group_id: selectedItem.group_id,
-        group_name: selectedItem.group_name,
-      });
+      await addTrackedItems([selectedItem]);
       setItemQuery("");
       setSelectedItem(null);
       setItemResults([]);
       setItemOpen(false);
-      await loadRoutes(selectedRoute.id);
     } catch (e) {
       setError(e instanceof Error ? e.message : "Failed to add item");
     } finally {
       setMutatingItems(false);
     }
-  }, [loadRoutes, selectedItem, selectedRoute]);
+  }, [addTrackedItems, selectedItem, selectedRoute]);
+
+  const handleImportTrackedGoodsClipboard = useCallback(async () => {
+    if (!selectedRoute) return;
+    const names = parseTrackedGoodsClipboard(trackedGoodsClipboardText);
+    if (names.length === 0) {
+      setError("Paste one or more item names separated by commas.");
+      return;
+    }
+
+    setMutatingItems(true);
+    setError("");
+
+    try {
+      const existingNames = new Set((selectedRoute.items ?? []).map((item) => normalizeItemName(item.type_name)));
+      const matches: ItemSearchResult[] = [];
+      const missing: string[] = [];
+      const duplicates: string[] = [];
+
+      const searchResults = await Promise.all(names.map((name) => searchItems(name, 10)));
+      searchResults.forEach((results, index) => {
+        const requestedName = names[index] ?? "";
+        const normalizedName = normalizeItemName(requestedName);
+        const exactMatch = results.find((item) => normalizeItemName(item.type_name) === normalizedName);
+
+        if (!exactMatch) {
+          missing.push(requestedName);
+          return;
+        }
+
+        if (existingNames.has(normalizeItemName(exactMatch.type_name)) || matches.some((item) => item.type_id === exactMatch.type_id)) {
+          duplicates.push(exactMatch.type_name);
+          return;
+        }
+
+        matches.push(exactMatch);
+        existingNames.add(normalizeItemName(exactMatch.type_name));
+      });
+
+      if (matches.length > 0) {
+        await addTrackedItems(matches);
+      }
+
+      if (missing.length > 0 || duplicates.length > 0) {
+        const detail = [
+          missing.length > 0 ? `No exact match: ${missing.join(", ")}` : "",
+          duplicates.length > 0 ? `Already tracked: ${duplicates.join(", ")}` : "",
+        ].filter(Boolean).join(" | ");
+        setError(detail);
+      } else {
+        setTrackedGoodsClipboardText("");
+      }
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "Failed to import clipboard goods");
+    } finally {
+      setMutatingItems(false);
+    }
+  }, [addTrackedItems, selectedRoute, trackedGoodsClipboardText]);
 
   const handleDeleteItem = useCallback(async (itemId: number) => {
     if (!selectedRoute) return;
@@ -1168,12 +1349,81 @@ export function ImportExportTab({ isLoggedIn }: Props) {
     return Array.from(groups.entries()).map(([label, items]) => ({ key: label, label, items }));
   }, [goodsGroup, organizedRouteItems]);
 
+  const trackedGoodsStats = useMemo(() => ({
+    total: routeItems.length,
+    custom: routeItems.filter((item) => item.custom_purchase_demand_days != null).length,
+    routeDefault: routeItems.filter((item) => item.custom_purchase_demand_days == null).length,
+  }), [routeItems]);
+
+  const filteredRouteItems = useMemo(() => {
+    const query = trackedGoodsQuery.trim().toLowerCase();
+    return organizedRouteItems.filter((item) => {
+      const categoryName = importExportCategoryName(item.category_id).toLowerCase();
+      const groupName = (item.group_name || "ungrouped").toLowerCase();
+      const matchesQuery = query === ""
+        || item.type_name.toLowerCase().includes(query)
+        || categoryName.includes(query)
+        || groupName.includes(query);
+      const matchesFilter = trackedGoodsFilter === "all"
+        || (trackedGoodsFilter === "custom" && item.custom_purchase_demand_days != null)
+        || (trackedGoodsFilter === "route_default" && item.custom_purchase_demand_days == null);
+      return matchesQuery && matchesFilter;
+    });
+  }, [organizedRouteItems, trackedGoodsFilter, trackedGoodsQuery]);
+
+  const groupedTrackedGoods = useMemo(() => {
+    if (goodsGroup === "none") {
+      return [{ key: "all", label: "", items: filteredRouteItems }];
+    }
+    const groups = new Map<string, typeof filteredRouteItems>();
+    for (const item of filteredRouteItems) {
+      const label = goodsGroup === "category"
+        ? importExportCategoryName(item.category_id)
+        : item.group_name || "Ungrouped";
+      const existing = groups.get(label) ?? [];
+      existing.push(item);
+      groups.set(label, existing);
+    }
+    return Array.from(groups.entries()).map(([label, items]) => ({ key: label, label, items }));
+  }, [filteredRouteItems, goodsGroup]);
+
+  const displayedTrackedItemIds = useMemo(() => groupedTrackedGoods.flatMap((group) => (
+    collapsedTrackedGroupKeys.includes(group.key) ? [] : group.items.map((item) => item.id)
+  )), [collapsedTrackedGroupKeys, groupedTrackedGoods]);
+
+  const selectedTrackedItems = useMemo(() => {
+    if (selectedTrackedItemIds.length === 0) return [];
+    const selectedSet = new Set(selectedTrackedItemIds);
+    return routeItems.filter((item) => selectedSet.has(item.id));
+  }, [routeItems, selectedTrackedItemIds]);
+
+  const visibleTrackedItemIds = useMemo(() => filteredRouteItems.map((item) => item.id), [filteredRouteItems]);
+  const selectableTrackedItemIds = displayedTrackedItemIds.length > 0 ? displayedTrackedItemIds : visibleTrackedItemIds;
+  const selectedVisibleCount = useMemo(() => {
+    if (selectableTrackedItemIds.length === 0 || selectedTrackedItemIds.length === 0) return 0;
+    const selectedSet = new Set(selectedTrackedItemIds);
+    return selectableTrackedItemIds.filter((id) => selectedSet.has(id)).length;
+  }, [selectableTrackedItemIds, selectedTrackedItemIds]);
+  const allVisibleSelected = selectableTrackedItemIds.length > 0 && selectedVisibleCount === selectableTrackedItemIds.length;
+
   useEffect(() => {
     setAllDemandDaysDraft("");
     setItemDemandDaysDrafts(
       Object.fromEntries(routeItems.map((item) => [item.id, item.custom_purchase_demand_days == null ? "" : String(item.custom_purchase_demand_days)])),
     );
   }, [routeItems]);
+
+  useEffect(() => {
+    setSelectedTrackedItemIds((prev) => prev.filter((id) => routeItems.some((item) => item.id === id)));
+  }, [routeItems]);
+
+  useEffect(() => {
+    setCollapsedTrackedGroupKeys((prev) => prev.filter((key) => groupedTrackedGoods.some((group) => group.key === key && group.label)));
+  }, [groupedTrackedGoods]);
+
+  useEffect(() => {
+    setCollapsedRestockGroupKeys((prev) => prev.filter((key) => groupedRestockingItems.some((group) => group.key === key && group.label)));
+  }, [groupedRestockingItems]);
 
   useEffect(() => {
     const drafts: Record<string, string> = {};
@@ -1640,101 +1890,328 @@ export function ImportExportTab({ isLoggedIn }: Props) {
                 </button>
               </div>
 
-              <div className="mt-3 space-y-2 max-h-64 overflow-auto pr-1">
-                {routeItems.length === 0 && (
-                  <div className="text-sm text-eve-dim border border-dashed border-eve-border rounded-sm p-3">
-                    No tracked goods added for this route yet.
+              <div className="mt-3 grid grid-cols-1 gap-3 xl:grid-cols-[minmax(0,1fr)_auto] xl:items-end">
+                <label className="flex flex-col gap-1">
+                  <span className="text-[11px] uppercase tracking-[0.12em] text-eve-dim">
+                    Clipboard Import
+                  </span>
+                  <textarea
+                    value={trackedGoodsClipboardText}
+                    onChange={(e) => setTrackedGoodsClipboardText(e.target.value)}
+                    placeholder="Navy Cap Booster 200,Astero,ElectroPunch Ultra L"
+                    rows={3}
+                    className="w-full px-3 py-2 bg-eve-input border border-eve-border rounded-sm text-eve-text text-sm resize-y"
+                  />
+                </label>
+                <button
+                  type="button"
+                  onClick={() => void handleImportTrackedGoodsClipboard()}
+                  disabled={trackedGoodsClipboardText.trim().length === 0 || mutatingItems}
+                  className="px-3 py-1.5 rounded-sm border border-eve-border text-eve-text text-xs uppercase tracking-[0.12em] disabled:opacity-40"
+                >
+                  Import Clipboard Goods
+                </button>
+              </div>
+
+              <div className="mt-3 space-y-3">
+                <div className="grid grid-cols-1 gap-3 xl:grid-cols-[minmax(0,1fr)_auto_auto] xl:items-end">
+                  <div>
+                    <div className="text-[11px] uppercase tracking-[0.12em] text-eve-dim mb-1">Filter Tracked Goods</div>
+                    <input
+                      value={trackedGoodsQuery}
+                      onChange={(e) => setTrackedGoodsQuery(e.target.value)}
+                      placeholder="Search tracked goods, category, or group"
+                      className="w-full px-3 py-1.5 bg-eve-input border border-eve-border rounded-sm text-eve-text text-sm"
+                    />
                   </div>
-                )}
-                {groupedRouteItems.map((group) => (
-                  <div key={group.key} className="space-y-2">
-                    {group.label && (
-                      <div className="px-1 flex items-center justify-between gap-3">
-                        <div className="text-[11px] uppercase tracking-[0.12em] text-eve-dim">
-                          {group.label}
-                        </div>
-                        <label className="flex items-center gap-2 text-[11px] uppercase tracking-[0.12em] text-eve-dim">
-                          <span>Group DoD</span>
-                          <input
-                            type="number"
-                            min="0"
-                            step="0.01"
-                            value={groupDemandDaysDrafts[group.key] ?? ""}
-                            placeholder="-"
-                            onChange={(e) => setGroupDemandDaysDrafts((prev) => ({ ...prev, [group.key]: e.target.value }))}
-                            onBlur={() => void handleSubmitDemandDaysDraft(
-                              group.items,
-                              groupDemandDaysDrafts[group.key] ?? "",
-                              (value) => setGroupDemandDaysDrafts((prev) => ({ ...prev, [group.key]: value })),
-                            )}
-                            onKeyDown={(e) => {
-                              if (e.key === "Enter") {
-                                e.preventDefault();
-                                void handleSubmitDemandDaysDraft(
+                  <label className="flex flex-col gap-1">
+                    <span className="text-[11px] uppercase tracking-[0.12em] text-eve-dim">Status</span>
+                    <select
+                      value={trackedGoodsFilter}
+                      onChange={(e) => setTrackedGoodsFilter(e.target.value as TrackedGoodsFilterMode)}
+                      className="px-2 py-1.5 bg-eve-input border border-eve-border rounded-sm text-[11px] text-eve-text"
+                    >
+                      <option value="all">All Goods</option>
+                      <option value="custom">Custom DoD</option>
+                      <option value="route_default">Using Route Default</option>
+                    </select>
+                  </label>
+                  <div className="flex flex-wrap items-center gap-2 xl:justify-end">
+                    <div className="rounded-sm border border-eve-border bg-eve-input/40 px-2 py-1 text-[11px] text-eve-dim">
+                      Visible <span className="text-eve-text">{filteredRouteItems.length}</span> / {trackedGoodsStats.total}
+                    </div>
+                    <div className="rounded-sm border border-eve-border bg-eve-input/40 px-2 py-1 text-[11px] text-eve-dim">
+                      Custom <span className="text-eve-accent">{trackedGoodsStats.custom}</span>
+                    </div>
+                    <div className="rounded-sm border border-eve-border bg-eve-input/40 px-2 py-1 text-[11px] text-eve-dim">
+                      Route Default <span className="text-eve-text">{trackedGoodsStats.routeDefault}</span>
+                    </div>
+                  </div>
+                </div>
+
+                <div className="rounded-sm border border-eve-border bg-eve-input/30 px-3 py-2">
+                  <div className="flex flex-col gap-3 xl:flex-row xl:items-center xl:justify-between">
+                    <div className="flex flex-wrap items-center gap-2 text-[11px] uppercase tracking-[0.12em] text-eve-dim">
+                      <span>{selectedTrackedItems.length} selected · {selectedVisibleCount} visible</span>
+                      {goodsGroup !== "none" && (
+                        <>
+                          <button
+                            type="button"
+                            disabled={groupedTrackedGoods.every((group) => !group.label) || collapsedTrackedGroupKeys.length === 0}
+                            onClick={() => setCollapsedTrackedGroupKeys([])}
+                            className="px-2 py-1 rounded-sm border border-eve-border text-eve-text disabled:opacity-40"
+                          >
+                            Expand All Groups
+                          </button>
+                          <button
+                            type="button"
+                            disabled={groupedTrackedGoods.every((group) => !group.label)}
+                            onClick={() => {
+                              setCollapsedTrackedGroupKeys(groupedTrackedGoods.filter((group) => group.label).map((group) => group.key));
+                            }}
+                            className="px-2 py-1 rounded-sm border border-eve-border text-eve-text disabled:opacity-40"
+                          >
+                            Collapse All Groups
+                          </button>
+                        </>
+                      )}
+                      <button
+                        type="button"
+                        disabled={selectableTrackedItemIds.length === 0}
+                        onClick={() => {
+                          setSelectedTrackedItemIds((prev) => {
+                            if (allVisibleSelected) {
+                              return prev.filter((id) => !selectableTrackedItemIds.includes(id));
+                            }
+                            return Array.from(new Set([...prev, ...selectableTrackedItemIds]));
+                          });
+                        }}
+                        className="px-2 py-1 rounded-sm border border-eve-border text-eve-text disabled:opacity-40"
+                      >
+                        {allVisibleSelected ? "Clear Displayed" : "Select Displayed"}
+                      </button>
+                      <button
+                        type="button"
+                        disabled={selectedTrackedItemIds.length === 0}
+                        onClick={() => setSelectedTrackedItemIds([])}
+                        className="px-2 py-1 rounded-sm border border-eve-border text-eve-text disabled:opacity-40"
+                      >
+                        Clear Selection
+                      </button>
+                    </div>
+                    <div className="flex flex-col gap-2 xl:flex-row xl:items-center">
+                      <label className="flex items-center gap-2 text-[11px] uppercase tracking-[0.12em] text-eve-dim">
+                        <span>Bulk Custom DoD</span>
+                        <input
+                          type="number"
+                          min="0"
+                          step="0.01"
+                          value={bulkDemandDaysDraft}
+                          placeholder="-"
+                          onChange={(e) => setBulkDemandDaysDraft(e.target.value)}
+                          onKeyDown={(e) => {
+                            if (e.key === "Enter") {
+                              e.preventDefault();
+                              void handleSubmitDemandDaysDraft(selectedTrackedItems, bulkDemandDaysDraft, setBulkDemandDaysDraft);
+                            }
+                          }}
+                          className="w-24 px-2 py-1 bg-eve-input border border-eve-border rounded-sm text-[11px] text-eve-text"
+                        />
+                      </label>
+                      <div className="flex flex-wrap items-center gap-2">
+                        <button
+                          type="button"
+                          disabled={selectedTrackedItems.length === 0 || mutatingItems}
+                          onClick={() => void handleSubmitDemandDaysDraft(selectedTrackedItems, bulkDemandDaysDraft, setBulkDemandDaysDraft)}
+                          className="px-2.5 py-1 rounded-sm bg-eve-accent/15 text-eve-accent text-[11px] uppercase tracking-[0.12em] disabled:opacity-40"
+                        >
+                          Apply to Selected
+                        </button>
+                        <button
+                          type="button"
+                          disabled={selectedTrackedItems.length === 0 || mutatingItems}
+                          onClick={() => void (async () => {
+                            await persistCustomDemandDays(selectedTrackedItems, null);
+                            setBulkDemandDaysDraft("");
+                          })()}
+                          className="px-2.5 py-1 rounded-sm border border-eve-border text-[11px] uppercase tracking-[0.12em] text-eve-text disabled:opacity-40"
+                        >
+                          Clear Custom DoD
+                        </button>
+                      </div>
+                    </div>
+                  </div>
+                </div>
+
+                <div className="rounded-sm border border-eve-border overflow-hidden">
+                  <div className="hidden lg:grid lg:grid-cols-[auto_minmax(0,2fr)_minmax(14rem,1fr)_6.5rem_8rem_5rem] lg:gap-3 lg:px-3 lg:py-2 bg-eve-input/95 border-b border-eve-border text-[10px] uppercase tracking-[0.14em] text-eve-dim sticky top-0 z-10">
+                    <div>
+                      <input
+                        type="checkbox"
+                        checked={allVisibleSelected}
+                        onChange={() => {
+                          setSelectedTrackedItemIds((prev) => {
+                            if (allVisibleSelected) {
+                              return prev.filter((id) => !selectableTrackedItemIds.includes(id));
+                            }
+                            return Array.from(new Set([...prev, ...selectableTrackedItemIds]));
+                          });
+                        }}
+                        aria-label="Select all displayed tracked goods"
+                        className="h-4 w-4 rounded border-eve-border bg-eve-input text-eve-accent"
+                      />
+                    </div>
+                    <div>Item</div>
+                    <div>Classification</div>
+                    <div>Effective DoD</div>
+                    <div>Custom DoD</div>
+                    <div>Action</div>
+                  </div>
+
+                  <div className="max-h-[40rem] overflow-auto">
+                    {routeItems.length === 0 && (
+                      <div className="text-sm text-eve-dim border border-dashed border-eve-border rounded-sm m-3 p-3">
+                        No tracked goods added for this route yet.
+                      </div>
+                    )}
+                    {routeItems.length > 0 && filteredRouteItems.length === 0 && (
+                      <div className="text-sm text-eve-dim border border-dashed border-eve-border rounded-sm m-3 p-3">
+                        No tracked goods match the current search and filter.
+                      </div>
+                    )}
+                    {groupedTrackedGoods.map((group) => (
+                      <div key={group.key} className="border-b border-eve-border last:border-b-0">
+                        {group.label && (
+                          <div className="flex flex-col gap-2 bg-eve-input/20 px-3 py-2 xl:flex-row xl:items-center xl:justify-between">
+                            <div className="flex items-center gap-2">
+                              <button
+                                type="button"
+                                onClick={() => {
+                                  setCollapsedTrackedGroupKeys((prev) => (
+                                    prev.includes(group.key)
+                                      ? prev.filter((key) => key !== group.key)
+                                      : [...prev, group.key]
+                                  ));
+                                }}
+                                className="flex items-center gap-2 text-[11px] uppercase tracking-[0.12em] text-eve-dim"
+                              >
+                                <span className="text-eve-accent">{collapsedTrackedGroupKeys.includes(group.key) ? "▸" : "▾"}</span>
+                                <span>{group.label}</span>
+                              </button>
+                              <div className="text-[11px] text-eve-dim">
+                                {group.items.length} items
+                              </div>
+                            </div>
+                            <label className="flex items-center gap-2 text-[11px] uppercase tracking-[0.12em] text-eve-dim">
+                              <span>Group DoD</span>
+                              <input
+                                type="number"
+                                min="0"
+                                step="0.01"
+                                value={groupDemandDaysDrafts[group.key] ?? ""}
+                                placeholder="-"
+                                onChange={(e) => setGroupDemandDaysDrafts((prev) => ({ ...prev, [group.key]: e.target.value }))}
+                                onBlur={() => void handleSubmitDemandDaysDraft(
                                   group.items,
                                   groupDemandDaysDrafts[group.key] ?? "",
                                   (value) => setGroupDemandDaysDrafts((prev) => ({ ...prev, [group.key]: value })),
-                                );
-                              }
-                            }}
-                            className="w-20 px-2 py-1 bg-eve-input border border-eve-border rounded-sm text-[11px] text-eve-text"
-                          />
-                        </label>
-                      </div>
-                    )}
-                    {group.items.map((item) => (
-                      <div key={item.id} className="flex items-center justify-between gap-3 border border-eve-border rounded-sm px-3 py-2">
-                        <div className="min-w-0">
-                          <div className="text-sm text-eve-text truncate">{item.type_name}</div>
-                          <div className="text-[11px] text-eve-dim truncate">
-                            {importExportCategoryName(item.category_id)}
-                            {item.group_name ? ` / ${item.group_name}` : ""}
+                                )}
+                                onKeyDown={(e) => {
+                                  if (e.key === "Enter") {
+                                    e.preventDefault();
+                                    void handleSubmitDemandDaysDraft(
+                                      group.items,
+                                      groupDemandDaysDrafts[group.key] ?? "",
+                                      (value) => setGroupDemandDaysDrafts((prev) => ({ ...prev, [group.key]: value })),
+                                    );
+                                  }
+                                }}
+                                className="w-20 px-2 py-1 bg-eve-input border border-eve-border rounded-sm text-[11px] text-eve-text"
+                              />
+                            </label>
                           </div>
-                          <div className="mt-1 text-[10px] uppercase tracking-[0.12em] text-eve-dim">
-                            Custom DoD: <span className="text-eve-accent">{formatDemandDays(item.custom_purchase_demand_days)}</span>
-                            {item.custom_purchase_demand_days == null ? ` · Route default ${formatDemandDays(routeForm.purchase_demand_days)}` : ""}
-                          </div>
-                        </div>
-                        <div className="flex items-center gap-3">
-                          <label className="flex items-center gap-2 text-[11px] uppercase tracking-[0.12em] text-eve-dim">
-                            <span>Custom DoD</span>
-                            <input
-                              type="number"
-                              min="0"
-                              step="0.01"
-                              value={itemDemandDaysDrafts[item.id] ?? ""}
-                              placeholder="-"
-                              onChange={(e) => setItemDemandDaysDrafts((prev) => ({ ...prev, [item.id]: e.target.value }))}
-                              onBlur={() => void handleSubmitDemandDaysDraft(
-                                [item],
-                                itemDemandDaysDrafts[item.id] ?? "",
-                                (value) => setItemDemandDaysDrafts((prev) => ({ ...prev, [item.id]: value })),
+                        )}
+                        {!collapsedTrackedGroupKeys.includes(group.key) && group.items.map((item) => {
+                          const isSelected = selectedTrackedItemIds.includes(item.id);
+                          return (
+                            <div
+                              key={item.id}
+                              className={cn(
+                                "grid grid-cols-1 gap-2 px-3 py-2 lg:grid-cols-[auto_minmax(0,2fr)_minmax(14rem,1fr)_6.5rem_8rem_5rem] lg:gap-3 lg:items-center",
+                                isSelected ? "bg-eve-accent/5" : "bg-transparent",
                               )}
-                              onKeyDown={(e) => {
-                                if (e.key === "Enter") {
-                                  e.preventDefault();
-                                  void handleSubmitDemandDaysDraft(
+                            >
+                              <div className="flex items-center">
+                                <input
+                                  type="checkbox"
+                                  checked={isSelected}
+                                  onChange={() => {
+                                    setSelectedTrackedItemIds((prev) => (
+                                      prev.includes(item.id)
+                                        ? prev.filter((id) => id !== item.id)
+                                        : [...prev, item.id]
+                                    ));
+                                  }}
+                                  aria-label={`Select ${item.type_name}`}
+                                  className="h-4 w-4 rounded border-eve-border bg-eve-input text-eve-accent"
+                                />
+                              </div>
+                              <div className="min-w-0">
+                                <div className="text-sm text-eve-text truncate">{item.type_name}</div>
+                                <div className="text-[10px] uppercase tracking-[0.12em] text-eve-dim">
+                                  Added {item.added_at ? new Date(item.added_at).toLocaleDateString() : "-"}
+                                </div>
+                              </div>
+                              <div className="min-w-0 text-[11px] text-eve-dim">
+                                <div className="truncate">{importExportCategoryName(item.category_id)}</div>
+                                <div className="truncate">{item.group_name || "Ungrouped"}</div>
+                              </div>
+                              <div className="text-[11px] uppercase tracking-[0.12em] text-eve-dim lg:text-right">
+                                <span className="font-mono tabular-nums text-eve-accent">
+                                  {formatDemandDays(item.custom_purchase_demand_days ?? routeForm.purchase_demand_days)}
+                                </span>
+                              </div>
+                              <label className="flex items-center gap-2 text-[11px] uppercase tracking-[0.12em] text-eve-dim">
+                                <span className="lg:hidden">Custom DoD</span>
+                                <input
+                                  type="number"
+                                  min="0"
+                                  step="0.01"
+                                  value={itemDemandDaysDrafts[item.id] ?? ""}
+                                  placeholder="-"
+                                  onChange={(e) => setItemDemandDaysDrafts((prev) => ({ ...prev, [item.id]: e.target.value }))}
+                                  onBlur={() => void handleSubmitDemandDaysDraft(
                                     [item],
                                     itemDemandDaysDrafts[item.id] ?? "",
                                     (value) => setItemDemandDaysDrafts((prev) => ({ ...prev, [item.id]: value })),
-                                  );
-                                }
-                              }}
-                              className="w-20 px-2 py-1 bg-eve-input border border-eve-border rounded-sm text-[11px] text-eve-text"
-                            />
-                          </label>
-                          <button
-                            type="button"
-                            onClick={() => void handleDeleteItem(item.id)}
-                            className="text-[11px] uppercase tracking-[0.12em] text-eve-error hover:text-eve-error/80"
-                          >
-                            Remove
-                          </button>
-                        </div>
+                                  )}
+                                  onKeyDown={(e) => {
+                                    if (e.key === "Enter") {
+                                      e.preventDefault();
+                                      void handleSubmitDemandDaysDraft(
+                                        [item],
+                                        itemDemandDaysDrafts[item.id] ?? "",
+                                        (value) => setItemDemandDaysDrafts((prev) => ({ ...prev, [item.id]: value })),
+                                      );
+                                    }
+                                  }}
+                                  className="w-24 px-2 py-1 bg-eve-input border border-eve-border rounded-sm text-[11px] text-eve-text"
+                                />
+                              </label>
+                              <button
+                                type="button"
+                                onClick={() => void handleDeleteItem(item.id)}
+                                className="text-left text-[11px] uppercase tracking-[0.12em] text-eve-error hover:text-eve-error/80"
+                              >
+                                Remove
+                              </button>
+                            </div>
+                          );
+                        })}
                       </div>
                     ))}
                   </div>
-                ))}
+                </div>
               </div>
             </TabSettingsPanel>
 
@@ -2266,95 +2743,179 @@ export function ImportExportTab({ isLoggedIn }: Props) {
                   defaultExpanded
                   persistKey="import-export-restocking-table"
                 >
-                  <div className="overflow-auto">
-                    <table className="min-w-full text-sm">
-                      <thead>
-                        <tr className="text-[11px] uppercase tracking-[0.12em] text-eve-dim border-b border-eve-border/60">
-                          <th className="px-3 py-2 text-left">Item</th>
-                          <th className="px-3 py-2 text-right">Target</th>
-                          <th className="px-3 py-2 text-right">Warehouse</th>
-                          <th className="px-3 py-2 text-right">Transit</th>
-                          <th className="px-3 py-2 text-right">Buy</th>
-                          <th className="px-3 py-2 text-right">Sell</th>
-                          <th className="px-3 py-2 text-right">Net</th>
-                          <th className="px-3 py-2 text-right">Move</th>
-                          <th className="px-3 py-2 text-right">Buy</th>
-                          <th className="px-3 py-2 text-right">Restock</th>
-                        </tr>
-                      </thead>
-                      <tbody>
-                        {restockingStale && !restockingOverview && (
-                          <tr>
-                            <td colSpan={10} className="px-3 py-4 text-sm text-eve-warning">
-                              Restocking data is stale. Click Refresh to rebuild warehouse, order, transit, and target stock totals.
-                            </td>
+                  <div className="space-y-3">
+                    <div className="grid grid-cols-1 gap-3 xl:grid-cols-[minmax(0,1fr)_auto_auto_auto] xl:items-end">
+                      <div>
+                        <div className="text-[11px] uppercase tracking-[0.12em] text-eve-dim mb-1">Search Restock Rows</div>
+                        <input
+                          value={restockQuery}
+                          onChange={(e) => setRestockQuery(e.target.value)}
+                          placeholder="Search by item or action state"
+                          className="w-full px-3 py-1.5 bg-eve-input border border-eve-border rounded-sm text-eve-text text-sm"
+                        />
+                      </div>
+                      <label className="flex flex-col gap-1">
+                        <span className="text-[11px] uppercase tracking-[0.12em] text-eve-dim">Filter</span>
+                        <select
+                          value={restockFilter}
+                          onChange={(e) => setRestockFilter(e.target.value as RestockFilterMode)}
+                          className="px-2 py-1.5 bg-eve-input border border-eve-border rounded-sm text-[11px] text-eve-text"
+                        >
+                          <option value="all">All Rows</option>
+                          <option value="buy">Needs Buy</option>
+                          <option value="move">Needs Move</option>
+                          <option value="transit">Has Transit</option>
+                          <option value="orders">Has Orders</option>
+                          <option value="healthy">Healthy</option>
+                        </select>
+                      </label>
+                      <label className="flex flex-col gap-1">
+                        <span className="text-[11px] uppercase tracking-[0.12em] text-eve-dim">Sort</span>
+                        <select
+                          value={restockSort}
+                          onChange={(e) => setRestockSort(e.target.value as RestockSortMode)}
+                          className="px-2 py-1.5 bg-eve-input border border-eve-border rounded-sm text-[11px] text-eve-text"
+                        >
+                          <option value="restock_desc">Restock Needed</option>
+                          <option value="buy_desc">Suggested Buy</option>
+                          <option value="move_desc">Suggested Move</option>
+                          <option value="demand_desc">Demand / Day</option>
+                          <option value="name_asc">Name A-Z</option>
+                        </select>
+                      </label>
+                      <label className="flex flex-col gap-1">
+                        <span className="text-[11px] uppercase tracking-[0.12em] text-eve-dim">Group</span>
+                        <select
+                          value={restockGroup}
+                          onChange={(e) => setRestockGroup(e.target.value as RestockGroupMode)}
+                          className="px-2 py-1.5 bg-eve-input border border-eve-border rounded-sm text-[11px] text-eve-text"
+                        >
+                          <option value="none">No Grouping</option>
+                          <option value="action">Group by Action</option>
+                          <option value="route_refs">Group by Route Count</option>
+                        </select>
+                      </label>
+                    </div>
+
+                    <div className="flex flex-wrap items-center justify-between gap-3 rounded-sm border border-eve-border bg-eve-input/30 px-3 py-2">
+                      <div className="flex flex-wrap items-center gap-2">
+                        <div className="rounded-sm border border-eve-border bg-eve-input/40 px-2 py-1 text-[11px] text-eve-dim">
+                          Visible <span className="text-eve-text">{filteredRestockingItems.length}</span> / {restockStats.total}
+                        </div>
+                        <div className="rounded-sm border border-eve-border bg-eve-input/40 px-2 py-1 text-[11px] text-eve-dim">
+                          Needs Buy <span className="text-eve-accent">{restockStats.buy}</span>
+                        </div>
+                        <div className="rounded-sm border border-eve-border bg-eve-input/40 px-2 py-1 text-[11px] text-eve-dim">
+                          Needs Move <span className="text-eve-accent">{restockStats.move}</span>
+                        </div>
+                        <div className="rounded-sm border border-eve-border bg-eve-input/40 px-2 py-1 text-[11px] text-eve-dim">
+                          Healthy <span className="text-eve-text">{restockStats.healthy}</span>
+                        </div>
+                      </div>
+                      <div className="text-[11px] uppercase tracking-[0.12em] text-eve-dim">
+                        Click a row for item details
+                      </div>
+                    </div>
+
+                    <div className="max-h-[42rem] overflow-auto rounded-sm border border-eve-border">
+                      <table className="min-w-full text-sm">
+                        <thead className="sticky top-0 z-10 bg-eve-input/95">
+                          <tr className="text-[11px] uppercase tracking-[0.12em] text-eve-dim border-b border-eve-border/60">
+                            <th className="px-3 py-2 text-left">Item</th>
+                            <th className="px-3 py-2 text-left">Status</th>
+                            <th className="px-3 py-2 text-right">Target</th>
+                            <th className="px-3 py-2 text-right">Warehouse</th>
+                            <th className="px-3 py-2 text-right">Transit</th>
+                            <th className="px-3 py-2 text-right">Orders</th>
+                            <th className="px-3 py-2 text-right">Net</th>
+                            <th className="px-3 py-2 text-right">Move</th>
+                            <th className="px-3 py-2 text-right">Buy</th>
+                            <th className="px-3 py-2 text-right">Restock</th>
                           </tr>
-                        )}
-                        {(restockingOverview?.items ?? []).map((item) => (
-                          <Fragment key={item.type_id}>
-                            <tr key={item.type_id} className="border-b border-eve-border/40">
-                              <td className="px-3 py-2">
-                                <div className="text-eve-text">{item.type_name}</div>
-                                <div className="text-[11px] text-eve-dim">
-                                  {item.route_refs} routes · {item.aggregated_demand_per_day.toFixed(1)} demand/day · {item.effective_demand_days_average.toFixed(2)} DoD
-                                </div>
+                        </thead>
+                        <tbody>
+                          {restockingStale && !restockingOverview && (
+                            <tr>
+                              <td colSpan={10} className="px-3 py-4 text-sm text-eve-warning">
+                                Restocking data is stale. Click Refresh to rebuild warehouse, order, transit, and target stock totals.
                               </td>
-                              <td className="px-3 py-2 text-right">{item.target_stock.toLocaleString()}</td>
-                              <td className="px-3 py-2 text-right">{item.warehouse_stock.toLocaleString()}</td>
-                              <td className="px-3 py-2 text-right">{item.transit_stock.toLocaleString()}</td>
-                              <td className="px-3 py-2 text-right">{item.buy_order_qty.toLocaleString()}</td>
-                              <td className="px-3 py-2 text-right">{item.sell_order_qty.toLocaleString()}</td>
-                              <td className="px-3 py-2 text-right">{item.net_available.toLocaleString()}</td>
-                              <td className="px-3 py-2 text-right text-eve-accent">{item.suggested_move_qty.toLocaleString()}</td>
-                              <td className="px-3 py-2 text-right text-eve-accent">{item.suggested_buy_qty.toLocaleString()}</td>
-                              <td className="px-3 py-2 text-right text-eve-accent">{item.restock_needed.toLocaleString()}</td>
                             </tr>
-                            {item.route_breakdowns.length > 0 && (
-                              <tr className="border-b border-eve-border/40 bg-eve-panel/30">
-                                <td colSpan={10} className="px-3 py-3">
-                                  <div className="text-[11px] uppercase tracking-[0.12em] text-eve-dim mb-2">Route Allocation</div>
-                                  <div className="grid grid-cols-1 xl:grid-cols-2 gap-2">
-                                    {item.route_breakdowns.map((route) => (
-                                      <div key={`${item.type_id}-${route.route_id}`} className="rounded-sm border border-eve-border px-2 py-2">
-                                        <div className="text-sm text-eve-text">
-                                          {route.route_name}
-                                          {route.target_location_name ? ` / ${route.target_location_name}` : ` / ${route.target_system_name}`}
-                                        </div>
-                                        <div className="text-[11px] text-eve-dim">
-                                          Target {route.target_stock.toLocaleString()} · Demand {route.demand_per_day.toFixed(1)}/day · {route.effective_demand_days.toFixed(2)} DoD
-                                        </div>
-                                        <div className="text-[11px] text-eve-dim">
-                                          Destination stock {route.destination_stock.toLocaleString()} · Sell orders {route.destination_sell_qty.toLocaleString()}
-                                        </div>
-                                        <div className="text-[11px] text-eve-accent">
-                                          Route deficit {route.route_deficit.toLocaleString()} · Move {route.suggested_haul_qty.toLocaleString()} · Buy {route.suggested_buy_qty.toLocaleString()}
-                                        </div>
-                                        {route.transfer_suggestions.length > 0 && (
-                                          <div className="mt-1 text-[11px] text-eve-dim">
-                                            {route.transfer_suggestions.map((suggestion) => (
-                                              <div key={`${route.route_id}-${suggestion.warehouse_id}`}>
-                                                Pull {suggestion.quantity.toLocaleString()} from {suggestion.warehouse_name} ({suggestion.location_name})
-                                              </div>
-                                            ))}
-                                          </div>
-                                        )}
+                          )}
+                          {groupedRestockingItems.map((group) => (
+                            <Fragment key={group.key}>
+                              {group.label && (
+                                <tr className="border-b border-eve-border/60 bg-eve-panel/30">
+                                  <td colSpan={10} className="px-3 py-2">
+                                    <div className="flex items-center justify-between gap-3">
+                                      <button
+                                        type="button"
+                                        onClick={() => {
+                                          setCollapsedRestockGroupKeys((prev) => (
+                                            prev.includes(group.key)
+                                              ? prev.filter((key) => key !== group.key)
+                                              : [...prev, group.key]
+                                          ));
+                                        }}
+                                        className="flex items-center gap-2 text-[11px] uppercase tracking-[0.12em] text-eve-dim"
+                                      >
+                                        <span className="text-eve-accent">{collapsedRestockGroupKeys.includes(group.key) ? "▸" : "▾"}</span>
+                                        <span>{group.label}</span>
+                                        <span className="text-eve-dim/80">{group.items.length}</span>
+                                      </button>
+                                      <div className="text-[11px] text-eve-dim">
+                                        Buy {group.items.reduce((sum, item) => sum + item.suggested_buy_qty, 0).toLocaleString()}
+                                        {" · "}
+                                        Move {group.items.reduce((sum, item) => sum + item.suggested_move_qty, 0).toLocaleString()}
                                       </div>
-                                    ))}
-                                  </div>
-                                </td>
-                              </tr>
-                            )}
-                          </Fragment>
-                        ))}
-                        {(restockingOverview?.items ?? []).length === 0 && (
-                          <tr>
-                            <td colSpan={10} className="px-3 py-4 text-sm text-eve-dim">
-                              No aggregated restocking rows yet.
-                            </td>
-                          </tr>
-                        )}
-                      </tbody>
-                    </table>
+                                    </div>
+                                  </td>
+                                </tr>
+                              )}
+                              {!collapsedRestockGroupKeys.includes(group.key) && group.items.map((item) => (
+                                    <tr
+                                      key={item.type_id}
+                                      className="border-b border-eve-border/40 cursor-pointer hover:bg-eve-accent/5"
+                                      onClick={() => setSelectedRestockTypeID(item.type_id)}
+                                    >
+                                      <td className="px-3 py-2">
+                                        <div className="text-eve-text">{item.type_name}</div>
+                                        <div className="text-[11px] text-eve-dim">
+                                          {item.route_refs} routes · {item.aggregated_demand_per_day.toFixed(1)} demand/day · {item.effective_demand_days_average.toFixed(2)} DoD
+                                        </div>
+                                      </td>
+                                      <td className="px-3 py-2">
+                                        <div className="text-[11px] uppercase tracking-[0.12em] text-eve-dim">
+                                          {restockActionLabel(item)}
+                                        </div>
+                                      </td>
+                                      <td className="px-3 py-2 text-right font-mono tabular-nums">{item.target_stock.toLocaleString()}</td>
+                                      <td className="px-3 py-2 text-right font-mono tabular-nums">{item.warehouse_stock.toLocaleString()}</td>
+                                      <td className="px-3 py-2 text-right font-mono tabular-nums">{item.transit_stock.toLocaleString()}</td>
+                                      <td className="px-3 py-2 text-right font-mono tabular-nums">{(item.buy_order_qty + item.sell_order_qty).toLocaleString()}</td>
+                                      <td className="px-3 py-2 text-right font-mono tabular-nums">{item.net_available.toLocaleString()}</td>
+                                      <td className="px-3 py-2 text-right font-mono tabular-nums text-eve-accent">{item.suggested_move_qty.toLocaleString()}</td>
+                                      <td className={cn(
+                                        "px-3 py-2 text-right font-mono tabular-nums",
+                                        item.suggested_buy_qty > 0 ? "text-eve-error" : "text-eve-accent",
+                                      )}>{item.suggested_buy_qty.toLocaleString()}</td>
+                                      <td className={cn(
+                                        "px-3 py-2 text-right font-mono tabular-nums",
+                                        item.restock_needed > 0 ? "text-eve-error" : "text-eve-text",
+                                      )}>{item.restock_needed.toLocaleString()}</td>
+                                    </tr>
+                              ))}
+                            </Fragment>
+                          ))}
+                          {filteredRestockingItems.length === 0 && (
+                            <tr>
+                              <td colSpan={10} className="px-3 py-4 text-sm text-eve-dim">
+                                {restockingItems.length === 0 ? "No aggregated restocking rows yet." : "No restock rows match the current search and filter."}
+                              </td>
+                            </tr>
+                          )}
+                        </tbody>
+                      </table>
+                    </div>
                   </div>
                 </TabSettingsPanel>
               </div>
@@ -2364,6 +2925,176 @@ export function ImportExportTab({ isLoggedIn }: Props) {
       </section>
 
       </div>
+
+      <Modal
+        open={selectedRestockItem != null}
+        onClose={() => setSelectedRestockTypeID(null)}
+        title={selectedRestockItem ? `Restock Details · ${selectedRestockItem.type_name}` : "Restock Details"}
+        width="max-w-5xl"
+      >
+        <div className="p-4 space-y-4 overflow-auto max-h-[80vh]">
+          {selectedRestockItem && (
+            <>
+              <div className="grid grid-cols-2 gap-3 xl:grid-cols-5">
+                <div className="rounded-sm border border-eve-border bg-eve-panel/40 px-3 py-2">
+                  <div className="text-[11px] uppercase tracking-[0.12em] text-eve-dim">Action</div>
+                  <div className="text-sm text-eve-text">{restockActionLabel(selectedRestockItem)}</div>
+                </div>
+                <div className="rounded-sm border border-eve-border bg-eve-panel/40 px-3 py-2">
+                  <div className="text-[11px] uppercase tracking-[0.12em] text-eve-dim">Restock</div>
+                  <div className={cn("text-sm font-mono tabular-nums", selectedRestockItem.restock_needed > 0 ? "text-eve-error" : "text-eve-text")}>
+                    {selectedRestockItem.restock_needed.toLocaleString()}
+                  </div>
+                </div>
+                <div className="rounded-sm border border-eve-border bg-eve-panel/40 px-3 py-2">
+                  <div className="text-[11px] uppercase tracking-[0.12em] text-eve-dim">Suggested Buy</div>
+                  <div className={cn("text-sm font-mono tabular-nums", selectedRestockItem.suggested_buy_qty > 0 ? "text-eve-error" : "text-eve-text")}>
+                    {selectedRestockItem.suggested_buy_qty.toLocaleString()}
+                  </div>
+                </div>
+                <div className="rounded-sm border border-eve-border bg-eve-panel/40 px-3 py-2">
+                  <div className="text-[11px] uppercase tracking-[0.12em] text-eve-dim">Suggested Move</div>
+                  <div className="text-sm font-mono tabular-nums text-eve-accent">{selectedRestockItem.suggested_move_qty.toLocaleString()}</div>
+                </div>
+                <div className="rounded-sm border border-eve-border bg-eve-panel/40 px-3 py-2">
+                  <div className="text-[11px] uppercase tracking-[0.12em] text-eve-dim">Net Available</div>
+                  <div className="text-sm font-mono tabular-nums text-eve-text">{selectedRestockItem.net_available.toLocaleString()}</div>
+                </div>
+              </div>
+
+              <div className="grid grid-cols-2 gap-3 xl:grid-cols-6">
+                <div className="rounded-sm border border-eve-border bg-eve-panel/20 px-3 py-2">
+                  <div className="text-[11px] uppercase tracking-[0.12em] text-eve-dim">Target</div>
+                  <div className="text-sm font-mono tabular-nums text-eve-text">{selectedRestockItem.target_stock.toLocaleString()}</div>
+                </div>
+                <div className="rounded-sm border border-eve-border bg-eve-panel/20 px-3 py-2">
+                  <div className="text-[11px] uppercase tracking-[0.12em] text-eve-dim">Warehouse</div>
+                  <div className="text-sm font-mono tabular-nums text-eve-text">{selectedRestockItem.warehouse_stock.toLocaleString()}</div>
+                </div>
+                <div className="rounded-sm border border-eve-border bg-eve-panel/20 px-3 py-2">
+                  <div className="text-[11px] uppercase tracking-[0.12em] text-eve-dim">Transit</div>
+                  <div className="text-sm font-mono tabular-nums text-eve-text">{selectedRestockItem.transit_stock.toLocaleString()}</div>
+                </div>
+                <div className="rounded-sm border border-eve-border bg-eve-panel/20 px-3 py-2">
+                  <div className="text-[11px] uppercase tracking-[0.12em] text-eve-dim">Buy Orders</div>
+                  <div className="text-sm font-mono tabular-nums text-eve-text">{selectedRestockItem.buy_order_qty.toLocaleString()}</div>
+                </div>
+                <div className="rounded-sm border border-eve-border bg-eve-panel/20 px-3 py-2">
+                  <div className="text-[11px] uppercase tracking-[0.12em] text-eve-dim">Sell Orders</div>
+                  <div className="text-sm font-mono tabular-nums text-eve-text">{selectedRestockItem.sell_order_qty.toLocaleString()}</div>
+                </div>
+                <div className="rounded-sm border border-eve-border bg-eve-panel/20 px-3 py-2">
+                  <div className="text-[11px] uppercase tracking-[0.12em] text-eve-dim">Demand / Day</div>
+                  <div className="text-sm font-mono tabular-nums text-eve-text">
+                    {selectedRestockItem.aggregated_demand_per_day.toFixed(1)} · {selectedRestockItem.effective_demand_days_average.toFixed(2)} DoD
+                  </div>
+                </div>
+              </div>
+
+              <div className="grid grid-cols-1 gap-4 xl:grid-cols-2">
+                <div className="space-y-2">
+                  <div className="text-[11px] uppercase tracking-[0.12em] text-eve-dim">Orders</div>
+                  {selectedRestockOrders.length === 0 ? (
+                    <div className="text-sm text-eve-dim border border-dashed border-eve-border rounded-sm p-3">
+                      No orders for this item.
+                    </div>
+                  ) : (
+                    selectedRestockOrders.map((order) => (
+                      <div key={`${order.character_id}-${order.order_id}`} className="rounded-sm border border-eve-border px-3 py-2 bg-eve-panel/30">
+                        <div className="text-sm text-eve-text">
+                          {order.is_buy_order ? "Buy" : "Sell"} · {order.volume_remain.toLocaleString()} / {order.volume_total.toLocaleString()} @ {order.price.toLocaleString()}
+                        </div>
+                        <div className="text-[11px] text-eve-dim">
+                          {order.character_name} · {order.location_name || `#${order.location_id}`}
+                        </div>
+                      </div>
+                    ))
+                  )}
+                </div>
+
+                <div className="space-y-2">
+                  <div className="text-[11px] uppercase tracking-[0.12em] text-eve-dim">Warehouses</div>
+                  {selectedRestockWarehouses.length === 0 ? (
+                    <div className="text-sm text-eve-dim border border-dashed border-eve-border rounded-sm p-3">
+                      No warehouse stock for this item.
+                    </div>
+                  ) : (
+                    selectedRestockWarehouses.map(({ warehouse, stock }) => (
+                      <div key={warehouse.id} className="rounded-sm border border-eve-border px-3 py-2 bg-eve-panel/30">
+                        <div className="text-sm text-eve-text">{warehouse.name}</div>
+                        <div className="text-[11px] text-eve-dim">
+                          {warehouse.system_name} / {warehouse.location_name}
+                        </div>
+                        <div className="text-[11px] text-eve-accent font-mono tabular-nums">
+                          {stock?.quantity.toLocaleString() ?? "0"} units
+                        </div>
+                      </div>
+                    ))
+                  )}
+                </div>
+              </div>
+
+              <div className="space-y-2">
+                <div className="text-[11px] uppercase tracking-[0.12em] text-eve-dim">Transit Coverage</div>
+                {selectedRestockTransit.length === 0 ? (
+                  <div className="text-sm text-eve-dim border border-dashed border-eve-border rounded-sm p-3">
+                    No transit entries carrying this item.
+                  </div>
+                ) : (
+                  selectedRestockTransit.map(({ entry, items }) => (
+                    <div key={entry.id} className="rounded-sm border border-eve-border px-3 py-2 bg-eve-panel/30">
+                      <div className="text-sm text-eve-text">
+                        {entry.from_system_name} / {entry.from_location_name} → {entry.to_system_name} / {entry.to_location_name}
+                      </div>
+                      <div className="mt-1 text-[11px] text-eve-accent">
+                        {items.map((item) => `${item.type_name} x ${item.quantity.toLocaleString()}`).join(" · ")}
+                      </div>
+                    </div>
+                  ))
+                )}
+              </div>
+
+              <div className="space-y-2">
+                <div className="text-[11px] uppercase tracking-[0.12em] text-eve-dim">Route Actions</div>
+                {selectedRestockItem.route_breakdowns.length === 0 ? (
+                  <div className="text-sm text-eve-dim border border-dashed border-eve-border rounded-sm p-3">
+                    No route allocation details for this item.
+                  </div>
+                ) : (
+                  <div className="grid grid-cols-1 xl:grid-cols-2 gap-2">
+                    {selectedRestockItem.route_breakdowns.map((route) => (
+                      <div key={`${selectedRestockItem.type_id}-${route.route_id}`} className="rounded-sm border border-eve-border px-3 py-2 bg-eve-panel/30">
+                        <div className="text-sm text-eve-text">
+                          {route.route_name}
+                          {route.target_location_name ? ` / ${route.target_location_name}` : ` / ${route.target_system_name}`}
+                        </div>
+                        <div className="text-[11px] text-eve-dim">
+                          Target {route.target_stock.toLocaleString()} · Demand {route.demand_per_day.toFixed(1)}/day · {route.effective_demand_days.toFixed(2)} DoD
+                        </div>
+                        <div className="text-[11px] text-eve-dim">
+                          Destination stock {route.destination_stock.toLocaleString()} · Sell orders {route.destination_sell_qty.toLocaleString()}
+                        </div>
+                        <div className="text-[11px] text-eve-accent">
+                          Route deficit {route.route_deficit.toLocaleString()} · Move {route.suggested_haul_qty.toLocaleString()} · Buy {route.suggested_buy_qty.toLocaleString()}
+                        </div>
+                        {route.transfer_suggestions.length > 0 && (
+                          <div className="mt-1 text-[11px] text-eve-dim">
+                            {route.transfer_suggestions.map((suggestion) => (
+                              <div key={`${route.route_id}-${suggestion.warehouse_id}`}>
+                                Pull {suggestion.quantity.toLocaleString()} from {suggestion.warehouse_name} ({suggestion.location_name})
+                              </div>
+                            ))}
+                          </div>
+                        )}
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </div>
+            </>
+          )}
+        </div>
+      </Modal>
 
       <Modal
         open={createModalOpen}
