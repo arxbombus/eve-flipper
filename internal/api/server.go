@@ -4300,11 +4300,43 @@ func (s *Server) handleExecutionPlan(w http.ResponseWriter, r *http.Request) {
 	if !req.IsBuy {
 		orderType = "buy"
 	}
-	orders, err := s.esi.FetchRegionOrders(req.RegionID, orderType)
-	if err != nil {
-		log.Printf("[API] execution/plan FetchRegionOrders: %v", err)
-		writeError(w, 502, "failed to fetch market orders")
-		return
+	var orders []esi.MarketOrder
+	var err error
+	if req.LocationID != 0 && isPlayerStructure(req.LocationID) {
+		userID := userIDFromRequest(r)
+		if userID == "" || s.sessions == nil || s.sso == nil {
+			writeError(w, 401, "player structure market data requires authenticated character access")
+			return
+		}
+		characterID, allScope, err := parseAuthScope(r)
+		if err != nil {
+			writeError(w, 400, err.Error())
+			return
+		}
+		selectedSessions, err := s.authSessionsForScope(userID, characterID, allScope, false)
+		if err != nil || len(selectedSessions) == 0 {
+			writeError(w, 401, "player structure market data requires an authenticated character")
+			return
+		}
+		token, err := s.sessions.EnsureValidTokenForUserCharacter(s.sso, userID, selectedSessions[0].CharacterID)
+		if err != nil {
+			log.Printf("[API] execution/plan EnsureValidTokenForUserCharacter: %v", err)
+			writeError(w, 401, "failed to refresh character token")
+			return
+		}
+		orders, err = s.esi.FetchStructureOrders(req.LocationID, token)
+		if err != nil {
+			log.Printf("[API] execution/plan FetchStructureOrders(%d): %v", req.LocationID, err)
+			writeError(w, 502, "failed to fetch structure market orders")
+			return
+		}
+	} else {
+		orders, err = s.esi.FetchRegionOrders(req.RegionID, orderType)
+		if err != nil {
+			log.Printf("[API] execution/plan FetchRegionOrders: %v", err)
+			writeError(w, 502, "failed to fetch market orders")
+			return
+		}
 	}
 
 	// Filter by type and optional location
@@ -4312,6 +4344,14 @@ func (s *Server) handleExecutionPlan(w http.ResponseWriter, r *http.Request) {
 	for _, o := range orders {
 		if o.TypeID != req.TypeID {
 			continue
+		}
+		if req.LocationID != 0 && isPlayerStructure(req.LocationID) {
+			if req.IsBuy && o.IsBuyOrder {
+				continue
+			}
+			if !req.IsBuy && !o.IsBuyOrder {
+				continue
+			}
 		}
 		if req.LocationID != 0 && o.LocationID != req.LocationID {
 			continue

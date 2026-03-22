@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { getPLEXDashboard, type PLEXDashboardParams } from "../lib/api";
+import { getCharacterInfo, getPLEXDashboard, type CharacterScope, type PLEXDashboardParams } from "../lib/api";
 import { useI18n } from "../lib/i18n";
 import { useTheme } from "../lib/useTheme";
 import type { PLEXDashboard, ArbitragePath } from "../lib/types";
@@ -12,7 +12,6 @@ import {
   ArbHistoryChart,
   MarketDepthCard,
   InjectionTiersCard,
-  FleetManagerCard,
   ArbitrageModal,
   PLEXChart,
   OmegaComparatorCard,
@@ -20,6 +19,8 @@ import {
 } from "./plex-tab/PlexTabSections";
 
 type PlexSubTab = "market" | "spfarm" | "analytics";
+const SKILL_ACCOUNTING = 16622;
+const SKILL_BROKER_RELATIONS = 3446;
 
 /** Format seconds as M:SS */
 function formatCountdown(sec: number): string {
@@ -28,7 +29,7 @@ function formatCountdown(sec: number): string {
   return `${m}:${s.toString().padStart(2, "0")}`;
 }
 
-export function PlexTab() {
+export function PlexTab({ isLoggedIn = false, activeCharacterId }: { isLoggedIn?: boolean; activeCharacterId?: CharacterScope }) {
   const { t } = useI18n();
   const { themeKey } = useTheme();
   const [dashboard, setDashboard] = useState<PLEXDashboard | null>(null);
@@ -40,6 +41,8 @@ export function PlexTab() {
   const [nesOmega, setNesOmega] = useState(500);
   const [omegaUSD, setOmegaUSD] = useState(14.99);
   const [showNES, setShowNES] = useState(false);
+  const [esiFeesLoading, setEsiFeesLoading] = useState(false);
+  const [esiFeesMsg, setEsiFeesMsg] = useState<string | null>(null);
   const [autoRefresh, setAutoRefresh] = useState(false);
   const [autoInterval, setAutoInterval] = useState(5); // minutes
   const [countdown, setCountdown] = useState(0); // seconds remaining
@@ -117,6 +120,27 @@ export function PlexTab() {
   const signal = dashboard?.signal;
   const ind = dashboard?.indicators;
 
+  const handleFetchEsiFees = useCallback(async () => {
+    if (!isLoggedIn) return;
+    setEsiFeesLoading(true);
+    setEsiFeesMsg(null);
+    try {
+      const info = await getCharacterInfo(activeCharacterId);
+      const skills = info.skills?.skills ?? [];
+      const accounting = skills.find((s) => s.skill_id === SKILL_ACCOUNTING)?.active_skill_level ?? 0;
+      const brokerRelations = skills.find((s) => s.skill_id === SKILL_BROKER_RELATIONS)?.active_skill_level ?? 0;
+      const nextSalesTax = parseFloat((8 * (1 - 0.11 * accounting)).toFixed(2));
+      const nextBrokerFee = parseFloat(Math.max(0, 3 - brokerRelations * 0.3).toFixed(2));
+      setSalesTax(nextSalesTax);
+      setBrokerFee(nextBrokerFee);
+      setEsiFeesMsg(t("plexSpfarmEsiFeesLoaded", { accounting, tax: nextSalesTax, broker: brokerRelations, fee: nextBrokerFee }));
+    } catch {
+      setEsiFeesMsg(t("plexSpfarmEsiError"));
+    } finally {
+      setEsiFeesLoading(false);
+    }
+  }, [activeCharacterId, isLoggedIn, t]);
+
   return (
     <div className="flex flex-col gap-3 h-full overflow-y-auto pr-1 scrollbar-thin">
       {/* Top bar: controls */}
@@ -143,6 +167,17 @@ export function PlexTab() {
             onChange={(e) => setBrokerFee(parseFloat(e.target.value) || 0)}
             className="w-16 px-1.5 py-1 bg-eve-input border border-eve-border rounded-sm text-xs text-eve-text"
           />
+          <button
+            type="button"
+            disabled={!isLoggedIn || esiFeesLoading}
+            onClick={() => void handleFetchEsiFees()}
+            title={isLoggedIn ? t("plexSpfarmEsiSkillsTitleLoggedIn") : t("plexSpfarmEsiSkillsTitleLoggedOut")}
+            className="flex items-center gap-1 px-2 py-1 rounded-sm text-[11px] border border-eve-accent/40 text-eve-accent bg-eve-accent/10 hover:bg-eve-accent/20 disabled:opacity-40 disabled:cursor-not-allowed transition-colors"
+          >
+            {esiFeesLoading ? <span className="animate-pulse">⟳</span> : "⚡"}
+            {esiFeesLoading ? t("plexLoading") : t("plexSpfarmEsiSkills")}
+          </button>
+          {esiFeesMsg && <span className="text-[11px] text-eve-dim">{esiFeesMsg}</span>}
         </div>
         <button
           onClick={() => setShowNES((v) => !v)}
@@ -324,14 +359,13 @@ export function PlexTab() {
           {subTab === "spfarm" && (
             <>
               {/* SP Farm Calculator (full width) */}
-              <SPFarmCard farm={dashboard.sp_farm} />
+              <SPFarmCard farm={dashboard.sp_farm} plexPrice={dashboard.plex_price} salesTax={salesTax} brokerFee={brokerFee} isLoggedIn={isLoggedIn} activeCharacterId={activeCharacterId} />
 
-              {/* Injection Tiers + Fleet Manager */}
-              <div className="grid grid-cols-1 lg:grid-cols-2 gap-3 shrink-0">
+              {/* Injection Tiers */}
+              <div className="grid grid-cols-1 gap-3 shrink-0">
                 {dashboard.injection_tiers && dashboard.injection_tiers.length > 0 && (
                   <InjectionTiersCard tiers={dashboard.injection_tiers} />
                 )}
-                <FleetManagerCard spFarm={dashboard.sp_farm} />
               </div>
             </>
           )}

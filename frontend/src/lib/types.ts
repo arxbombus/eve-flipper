@@ -1805,9 +1805,12 @@ export interface SPFarmResult {
   extractors_per_month: number;
   extractor_cost_plex: number;
   extractor_cost_isk: number;
+  extractor_buy_price: number;
+  extractor_sell_price: number;
   total_cost_isk: number;
   injectors_produced: number;
   injector_sell_price: number;
+  injector_buy_price: number;
   revenue_isk: number;
   profit_isk: number;
   profit_per_day: number;

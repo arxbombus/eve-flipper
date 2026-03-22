@@ -1915,7 +1915,7 @@ function App() {
           <div
             className={`flex-1 min-h-0 flex flex-col ${tab === "plex" ? "" : "hidden"}`}
           >
-            <PlexTab />
+            <PlexTab isLoggedIn={authStatus.logged_in} activeCharacterId={authStatus.character_id} />
           </div>
         </div>
       </div>

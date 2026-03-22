@@ -1,4 +1,3 @@
-import { useState } from "react";
 import { formatISK } from "../../lib/format";
 import { useI18n } from "../../lib/i18n";
 import type {
@@ -9,6 +8,7 @@ import type {
   PLEXGlobalPrice,
   PLEXIndicators,
 } from "../../lib/types";
+
 export function SignalCard({ signal, indicators }: { signal: PLEXDashboard["signal"]; indicators: PLEXIndicators | null | undefined }) {
   const { t } = useI18n();
   const colorMap = { BUY: "text-eve-success", SELL: "text-eve-error", HOLD: "text-eve-warning" };
@@ -162,182 +162,6 @@ export function ArbitrageRow({ arb, onClick }: { arb: ArbitragePath; onClick: ()
   );
 }
 
-export function SPFarmCard({ farm }: { farm: PLEXDashboard["sp_farm"] }) {
-  const { t } = useI18n();
-  const [numChars, setNumChars] = useState(1);
-  const [sellMode, setSellMode] = useState<"order" | "instant">("order");
-
-  // Per-char profit based on sell mode (fallback to 0 for fields that may be missing from old cached responses)
-  const perCharProfit = sellMode === "instant" ? (farm.instant_sell_profit_isk ?? 0) : farm.profit_isk;
-  const perCharROI = sellMode === "instant" ? (farm.instant_sell_roi ?? 0) : farm.roi;
-  const perCharRevenue = sellMode === "instant" ? (farm.instant_sell_revenue_isk ?? 0) : farm.revenue_isk;
-  const isViable = perCharProfit > 0;
-
-  // Multi-char scaling (same account): 1st char uses Omega + extractors,
-  // additional chars scale by extractor demand (Omega is shared per account).
-  const extractorCostPerChar = farm.total_cost_isk - farm.omega_cost_isk; // just extractor cost
-  const totalMonthlyCost = farm.total_cost_isk + (numChars > 1 ? (numChars - 1) * extractorCostPerChar : 0);
-  const totalMonthlyRevenue = numChars * perCharRevenue;
-  const totalMonthlyProfit = totalMonthlyRevenue - totalMonthlyCost;
-
-  return (
-    <div className={`border rounded-sm p-3 ${isViable ? "border-eve-success/30 bg-eve-success/5" : "border-eve-error/30 bg-eve-error/5"}`}>
-      <h3 className="text-xs font-semibold text-eve-dim uppercase tracking-wider mb-2">{t("plexSPFarm")}</h3>
-      <div className="space-y-1 text-xs">
-        <Row label={t("plexOmegaCost")} value={`${farm.omega_cost_plex} PLEX = ${formatISK(farm.omega_cost_isk)}`} />
-        <Row label={t("plexExtractors")} value={`${farm.extractors_per_month.toFixed(1)}x @ ${farm.extractor_cost_plex} PLEX`} />
-        <Row label={t("plexTotalCost")} value={formatISK(farm.total_cost_isk)} dim />
-        <div className="border-t border-eve-border/50 my-1.5" />
-        <Row label={t("plexInjectors")} value={`${farm.injectors_produced.toFixed(1)}x @ ${formatISK(farm.injector_sell_price)}`} />
-        <Row label={t("plexRevenue")} value={formatISK(perCharRevenue)} dim />
-
-        {/* Sell mode toggle */}
-        <div className="flex items-center gap-2 mt-1">
-          <button
-            onClick={() => setSellMode("order")}
-            className={`px-2 py-0.5 rounded-sm text-[10px] font-semibold uppercase tracking-wider border transition-all ${sellMode === "order" ? "border-eve-accent/50 bg-eve-accent/10 text-eve-accent" : "border-eve-border bg-eve-panel text-eve-dim hover:text-eve-text"}`}
-          >
-            {t("plexSellOrder")}
-          </button>
-          <button
-            onClick={() => setSellMode("instant")}
-            className={`px-2 py-0.5 rounded-sm text-[10px] font-semibold uppercase tracking-wider border transition-all ${sellMode === "instant" ? "border-eve-warning/50 bg-eve-warning/10 text-eve-warning" : "border-eve-border bg-eve-panel text-eve-dim hover:text-eve-text"}`}
-          >
-            {t("plexInstantSell")}
-          </button>
-          {sellMode === "instant" && (
-            <span className="text-[9px] text-eve-dim italic">{t("plexInstantSellNote")}</span>
-          )}
-        </div>
-
-        <div className="border-t border-eve-border/50 my-1.5" />
-        <div className="flex justify-between items-center">
-          <span className="font-semibold text-eve-text">{t("plexNetProfit")}</span>
-          <span className={`font-mono font-bold text-sm ${isViable ? "text-eve-success" : "text-eve-error"}`}>
-            {perCharProfit >= 0 ? "+" : ""}{formatISK(perCharProfit)}/mo
-          </span>
-        </div>
-        <div className="flex justify-between items-center">
-          <span className="text-eve-dim">{t("plexPerDay")}</span>
-          <span className={`font-mono ${isViable ? "text-eve-success" : "text-eve-error"}`}>
-            {formatISK(perCharProfit / 30)}/day
-          </span>
-        </div>
-        <div className="flex justify-between items-center">
-          <span className="text-eve-dim">ROI</span>
-          <span className={`font-mono font-semibold ${perCharROI > 0 ? "text-eve-success" : "text-eve-error"}`}>
-            {perCharROI > 0 ? "+" : ""}{perCharROI.toFixed(1)}%
-          </span>
-        </div>
-
-        {/* +5 implants (respects sell mode) */}
-        <div className="border-t border-eve-border/30 my-1.5" />
-        {(() => {
-          const plus5Profit = sellMode === "instant" ? (farm.instant_sell_profit_plus5 ?? farm.profit_plus5) : farm.profit_plus5;
-          const plus5ROI = sellMode === "instant" ? (farm.instant_sell_roi_plus5 ?? farm.roi_plus5) : farm.roi_plus5;
-          return (
-            <div className="text-[11px] text-eve-dim">
-              {t("plexWithImplants")}:
-              <span className={`ml-1 font-mono ${plus5Profit > 0 ? "text-eve-success" : "text-eve-error"}`}>
-                {plus5Profit >= 0 ? "+" : ""}{formatISK(plus5Profit)}/mo
-              </span>
-              <span className="mx-1">|</span>
-              <span className={`font-mono ${plus5ROI > 0 ? "text-eve-success" : "text-eve-error"}`}>
-                {plus5ROI > 0 ? "+" : ""}{plus5ROI.toFixed(1)}%
-              </span>
-            </div>
-          );
-        })()}
-
-        {/* Startup cost & payback */}
-        {(farm.startup_train_days ?? 0) > 0 && (
-          <>
-            <div className="border-t border-eve-border/30 my-1.5" />
-            <div className="text-[10px] text-eve-dim uppercase tracking-wider font-medium mb-1">{t("plexStartupCost")}</div>
-            <Row label={t("plexStartupTrainDays")} value={`~${Math.ceil(farm.startup_train_days)} ${t("plexDays")} (~${(farm.startup_train_days / 30).toFixed(1)} ${t("plexMonths")})`} />
-            <Row label={t("plexStartupCost")} value={formatISK(farm.startup_cost_isk ?? 0)} />
-            {(farm.payback_days ?? 0) > 0 && (
-              <Row label={t("plexPaybackPeriod")} value={`~${Math.ceil(farm.payback_days)} ${t("plexDays")} (~${(farm.payback_days / 30).toFixed(1)} ${t("plexMonths")})`} />
-            )}
-          </>
-        )}
-
-        {/* Multi-character scaling */}
-        <div className="border-t border-eve-border/30 my-1.5" />
-        <div className="text-[10px] text-eve-dim uppercase tracking-wider font-medium mb-1">{t("plexMultiChar")}</div>
-        <div className="flex items-center gap-2">
-          <label className="text-eve-dim text-[11px]">{t("plexNumChars")}</label>
-          <input
-            type="number"
-            min="1"
-            max="50"
-            value={numChars}
-            onChange={(e) => setNumChars(Math.max(1, parseInt(e.target.value) || 1))}
-            className="w-14 px-1.5 py-0.5 bg-eve-input border border-eve-border rounded-sm text-xs text-eve-text font-mono text-center"
-          />
-          </div>
-        {numChars > 1 && (
-          <div className="flex justify-between items-center mt-1">
-            <span className="font-semibold text-eve-text text-[11px]">{t("plexTotalMonthlyProfit")} ({numChars}x)</span>
-            <span className={`font-mono font-bold ${totalMonthlyProfit > 0 ? "text-eve-success" : "text-eve-error"}`}>
-              {totalMonthlyProfit >= 0 ? "+" : ""}{formatISK(totalMonthlyProfit)}/mo
-            </span>
-          </div>
-        )}
-
-        {/* Break-even PLEX price */}
-        {(farm.break_even_plex ?? 0) > 0 && (
-          <>
-            <div className="border-t border-eve-border/30 my-1.5" />
-            <div className="flex justify-between items-center">
-              <span className="text-eve-dim text-[11px]">{t("plexBreakEven")}</span>
-              <span className={`font-mono text-[11px] font-semibold ${(farm.plex_unit_price ?? 0) < farm.break_even_plex ? "text-eve-success" : "text-eve-error"}`}>
-                {formatISK(farm.break_even_plex)}/PLEX
-              </span>
-            </div>
-          </>
-        )}
-
-        {/* Omega ISK equivalent */}
-        {(farm.omega_isk_value ?? 0) > 0 && (
-          <>
-            <div className="border-t border-eve-border/30 my-1.5" />
-            <div className="text-[11px] text-eve-dim">
-              {t("plexOmegaISKValue").replace("{plex}", String(farm.omega_cost_plex)).replace("{isk}", formatISK(farm.omega_isk_value))}
-              {(farm.plex_unit_price ?? 0) > 0 && (
-                <span className="ml-1">({formatISK(farm.plex_unit_price)} {t("plexPerPLEX")})</span>
-              )}
-            </div>
-          </>
-        )}
-      </div>
-    </div>
-  );
-}
-
-function Row({ label, value, dim }: { label: string; value: string; dim?: boolean }) {
-  return (
-    <div className="flex justify-between">
-      <span className="text-eve-dim">{label}</span>
-      <span className={`font-mono ${dim ? "text-eve-dim" : "text-eve-text"}`}>{value}</span>
-    </div>
-  );
-}
-
-function MetricCell({ label, value, color }: { label: string; value: string; color?: string }) {
-  return (
-    <div className="text-center">
-      <div className="text-[10px] text-eve-dim uppercase tracking-wider">{label}</div>
-      <div className={`text-sm font-mono font-semibold ${color || "text-eve-text"}`}>{value}</div>
-    </div>
-  );
-}
-
-// ===================================================================
-// Historical Arbitrage Profitability Chart
-// ===================================================================
-
-
 export function MarketDepthCard({ depth }: { depth: MarketDepthInfo }) {
   const { t } = useI18n();
   const fmtHrs = (h: number) => h > 0 ? `~${h < 1 ? "<1" : h.toFixed(1)} ${t("plexHours")}` : "";
@@ -436,6 +260,15 @@ export function InjectionTiersCard({ tiers }: { tiers: InjectionTier[] }) {
           })}
         </tbody>
       </table>
+    </div>
+  );
+}
+
+function MetricCell({ label, value, color }: { label: string; value: string; color?: string }) {
+  return (
+    <div className="text-center">
+      <div className="text-[10px] text-eve-dim uppercase tracking-wider">{label}</div>
+      <div className={`text-sm font-mono font-semibold ${color || "text-eve-text"}`}>{value}</div>
     </div>
   );
 }

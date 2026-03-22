@@ -244,9 +244,12 @@ type SPFarmResult struct {
 	ExtractorsPerMonth float64 `json:"extractors_per_month"`
 	ExtractorCostPLEX  int     `json:"extractor_cost_plex"`
 	ExtractorCostISK   float64 `json:"extractor_cost_isk"`
+	ExtractorBuyPrice  float64 `json:"extractor_buy_price"`
+	ExtractorSellPrice float64 `json:"extractor_sell_price"`
 	TotalCostISK       float64 `json:"total_cost_isk"`
 	InjectorsProduced  float64 `json:"injectors_produced"`
 	InjectorSellPrice  float64 `json:"injector_sell_price"`
+	InjectorBuyPrice   float64 `json:"injector_buy_price"`
 	RevenueISK         float64 `json:"revenue_isk"`
 	ProfitISK          float64 `json:"profit_isk"`
 	ProfitPerDay       float64 `json:"profit_per_day"`
@@ -646,7 +649,7 @@ func ComputePLEXDashboard(
 	}
 
 	// ---- SP Farm Calculator ----
-	spFarm := computeSPFarm(plexPrice, extractorSell, injectorSell, injectorBuy, netMult, salesTaxOnly, nesExtractor, nesOmega, nesMPTC)
+	spFarm := computeSPFarm(plexPrice, extractorBuy, extractorSell, injectorSell, injectorBuy, netMult, salesTaxOnly, nesExtractor, nesOmega, nesMPTC)
 
 	// ---- Price History ----
 	priceHistory := convertHistory(sortedHist)
@@ -792,7 +795,7 @@ func computeGlobalPLEXPrice(orders []esi.MarketOrder, history []esi.HistoryEntry
 // computeSPFarm calculates monthly SP farming profitability.
 // netMult = 1 - salesTax/100 - brokerFee/100.
 // salesTaxOnly = 1 - salesTax/100 (for instant sell, no broker fee on seller side).
-func computeSPFarm(plexPrice, extractorMarketSell, injectorMarketSell, injectorBuyPrice, netMult, salesTaxOnly float64, nesExtractor, nesOmega, nesMPTC int) SPFarmResult {
+func computeSPFarm(plexPrice, extractorMarketBuy, extractorMarketSell, injectorMarketSell, injectorBuyPrice, netMult, salesTaxOnly float64, nesExtractor, nesOmega, nesMPTC int) SPFarmResult {
 	omegaCostISK := float64(nesOmega) * plexPrice
 
 	// Base attributes (no implants)
@@ -862,9 +865,12 @@ func computeSPFarm(plexPrice, extractorMarketSell, injectorMarketSell, injectorB
 		ExtractorsPerMonth: extractorsBase,
 		ExtractorCostPLEX:  nesExtractor,
 		ExtractorCostISK:   extractorCostISK,
+		ExtractorBuyPrice:  extractorMarketBuy,
+		ExtractorSellPrice: extractorMarketSell,
 		TotalCostISK:       totalCostBase,
 		InjectorsProduced:  extractorsBase,
 		InjectorSellPrice:  injectorMarketSell,
+		InjectorBuyPrice:   injectorBuyPrice,
 		RevenueISK:         revenueBase,
 		ProfitISK:          profitBase,
 		ProfitPerDay:       profitBase / 30,

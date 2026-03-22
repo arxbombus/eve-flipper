@@ -700,11 +700,14 @@ export async function getExecutionPlan(params: {
   location_id?: number;
   quantity: number;
   is_buy: boolean;
+  character_id?: CharacterScope;
   /** Days of history for impact calibration (λ, η, n*). From station trading "Period (days)" when present. */
   impact_days?: number;
   signal?: AbortSignal;
 }): Promise<ExecutionPlanResult> {
-  const res = await apiFetch(`${BASE}/api/execution/plan`, {
+  const query = new URLSearchParams();
+  appendCharacterScope(query, params.character_id);
+  const res = await apiFetch(`${BASE}/api/execution/plan${query.toString() ? `?${query.toString()}` : ""}`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     signal: params.signal,
