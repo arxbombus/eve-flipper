@@ -1267,13 +1267,16 @@ func (d *DB) migrate() error {
 				location_id   INTEGER NOT NULL,
 				location_name TEXT NOT NULL,
 				is_structure  INTEGER NOT NULL DEFAULT 0,
+				owner_kind    TEXT NOT NULL DEFAULT 'character',
+				corporation_id INTEGER NOT NULL DEFAULT 0,
+				corporation_name TEXT NOT NULL DEFAULT '',
 				created_at    TEXT NOT NULL,
 				updated_at    TEXT NOT NULL
 			);
 			CREATE INDEX IF NOT EXISTS idx_import_export_warehouses_user_updated
 				ON import_export_warehouses(user_id, updated_at DESC);
-			CREATE UNIQUE INDEX IF NOT EXISTS idx_import_export_warehouses_user_location
-				ON import_export_warehouses(user_id, location_id);
+			CREATE UNIQUE INDEX IF NOT EXISTS idx_import_export_warehouses_user_owner_location
+				ON import_export_warehouses(user_id, owner_kind, corporation_id, location_id);
 
 			CREATE TABLE IF NOT EXISTS import_export_transit_entries (
 				id                 INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -1308,6 +1311,87 @@ func (d *DB) migrate() error {
 			return fmt.Errorf("migration v28: %w", err)
 		}
 		logger.Info("DB", "Applied migration v28 (import/export routes)")
+	}
+
+	warehousesExists, err := d.tableExists("import_export_warehouses")
+	if err != nil {
+		return fmt.Errorf("migration v28 check import_export_warehouses exists: %w", err)
+	}
+	if warehousesExists {
+		warehouseCols := []struct {
+			name string
+			def  string
+		}{
+			{name: "owner_kind", def: "TEXT NOT NULL DEFAULT 'character'"},
+			{name: "corporation_id", def: "INTEGER NOT NULL DEFAULT 0"},
+			{name: "corporation_name", def: "TEXT NOT NULL DEFAULT ''"},
+		}
+		for _, c := range warehouseCols {
+			if err := d.ensureTableColumn("import_export_warehouses", c.name, c.def); err != nil {
+				return fmt.Errorf("migration v28 add import_export_warehouses.%s: %w", c.name, err)
+			}
+		}
+		if _, err := d.sql.Exec(`DROP INDEX IF EXISTS idx_import_export_warehouses_user_location;`); err != nil {
+			return fmt.Errorf("migration v28 drop legacy warehouse unique index: %w", err)
+		}
+		if _, err := d.sql.Exec(`
+			CREATE UNIQUE INDEX IF NOT EXISTS idx_import_export_warehouses_user_owner_location
+				ON import_export_warehouses(user_id, owner_kind, corporation_id, location_id);
+		`); err != nil {
+			return fmt.Errorf("migration v28 create warehouse owner/location unique index: %w", err)
+		}
+	}
+	if version < 29 {
+		_, err := d.sql.Exec(`
+			CREATE TABLE IF NOT EXISTS portfolio_shipping_rules (
+				id            INTEGER PRIMARY KEY AUTOINCREMENT,
+				user_id       TEXT NOT NULL,
+				location_id   INTEGER NOT NULL,
+				location_name TEXT NOT NULL DEFAULT '',
+				system_id     INTEGER NOT NULL DEFAULT 0,
+				system_name   TEXT NOT NULL DEFAULT '',
+				cost_per_m3   REAL NOT NULL DEFAULT 0,
+				created_at    TEXT NOT NULL,
+				updated_at    TEXT NOT NULL
+			);
+			CREATE INDEX IF NOT EXISTS idx_portfolio_shipping_rules_user_updated
+				ON portfolio_shipping_rules(user_id, updated_at DESC, id DESC);
+			CREATE UNIQUE INDEX IF NOT EXISTS idx_portfolio_shipping_rules_user_location
+				ON portfolio_shipping_rules(user_id, location_id);
+
+			INSERT OR IGNORE INTO schema_version (version) VALUES (29);
+		`)
+		if err != nil {
+			return fmt.Errorf("migration v29: %w", err)
+		}
+		logger.Info("DB", "Applied migration v29 (portfolio shipping rules)")
+	}
+	shippingRulesExists, err := d.tableExists("portfolio_shipping_rules")
+	if err != nil {
+		return fmt.Errorf("migration v29 check portfolio_shipping_rules exists: %w", err)
+	}
+	if !shippingRulesExists {
+		if _, err := d.sql.Exec(`
+			CREATE TABLE IF NOT EXISTS portfolio_shipping_rules (
+				id            INTEGER PRIMARY KEY AUTOINCREMENT,
+				user_id       TEXT NOT NULL,
+				location_id   INTEGER NOT NULL,
+				location_name TEXT NOT NULL DEFAULT '',
+				system_id     INTEGER NOT NULL DEFAULT 0,
+				system_name   TEXT NOT NULL DEFAULT '',
+				cost_per_m3   REAL NOT NULL DEFAULT 0,
+				created_at    TEXT NOT NULL,
+				updated_at    TEXT NOT NULL
+			);
+			CREATE INDEX IF NOT EXISTS idx_portfolio_shipping_rules_user_updated
+				ON portfolio_shipping_rules(user_id, updated_at DESC, id DESC);
+			CREATE UNIQUE INDEX IF NOT EXISTS idx_portfolio_shipping_rules_user_location
+				ON portfolio_shipping_rules(user_id, location_id);
+			INSERT OR IGNORE INTO schema_version (version) VALUES (29);
+		`); err != nil {
+			return fmt.Errorf("migration v29 ensure portfolio_shipping_rules: %w", err)
+		}
+		logger.Info("DB", "Ensured migration v29 schema (portfolio shipping rules)")
 	}
 	return nil
 }

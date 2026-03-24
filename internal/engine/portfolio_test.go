@@ -532,3 +532,58 @@ func TestComputePortfolioPnLWithOptions_OpenPositionsSummaryNotTruncated(t *test
 		t.Fatalf("returned open positions len = %d, want 50 (UI cap)", len(got.OpenPositions))
 	}
 }
+
+func TestComputePortfolioPnLWithOptions_AppliesShippingRuleBySellLocation(t *testing.T) {
+	txns := []esi.WalletTransaction{
+		{
+			TransactionID: 1,
+			Date:          time.Now().UTC().AddDate(0, 0, -2).Format(time.RFC3339),
+			TypeID:        24692,
+			TypeName:      "Praxis",
+			LocationID:    60003760,
+			LocationName:  "Jita IV - Moon 4",
+			UnitPrice:     227_000_000,
+			Quantity:      1,
+			IsBuy:         true,
+			VolumeM3:      50000,
+		},
+		{
+			TransactionID: 2,
+			Date:          time.Now().UTC().AddDate(0, 0, -1).Format(time.RFC3339),
+			TypeID:        24692,
+			TypeName:      "Praxis",
+			LocationID:    61000001,
+			LocationName:  "C-J6MT - Taj Mahgoon",
+			UnitPrice:     320_000_000,
+			Quantity:      1,
+			IsBuy:         false,
+		},
+	}
+
+	got := ComputePortfolioPnLWithOptions(txns, PortfolioPnLOptions{
+		LookbackDays:            30,
+		SalesTaxPercent:         0,
+		BrokerFeePercent:        0,
+		LedgerLimit:             100,
+		ShippingRulesByLocation: map[int64]float64{61000001: 1200},
+		IncludeUnmatchedSell:    false,
+	})
+	if got == nil {
+		t.Fatal("expected non-nil")
+	}
+	if math.Abs(got.Summary.TotalShipping-60_000_000) > 1e-6 {
+		t.Fatalf("total shipping = %v, want 60000000", got.Summary.TotalShipping)
+	}
+	if math.Abs(got.Summary.TotalPnL-33_000_000) > 1e-6 {
+		t.Fatalf("total pnl = %v, want 33000000", got.Summary.TotalPnL)
+	}
+	if len(got.Ledger) != 1 {
+		t.Fatalf("ledger len = %d, want 1", len(got.Ledger))
+	}
+	if math.Abs(got.Ledger[0].ShippingCost-60_000_000) > 1e-6 {
+		t.Fatalf("ledger shipping = %v, want 60000000", got.Ledger[0].ShippingCost)
+	}
+	if math.Abs(got.Ledger[0].RealizedPnL-33_000_000) > 1e-6 {
+		t.Fatalf("ledger pnl = %v, want 33000000", got.Ledger[0].RealizedPnL)
+	}
+}

@@ -24,6 +24,7 @@ import type {
   ImportExportRouteItem,
   ImportExportTransitEntry,
   ImportExportWarehouse,
+  ImportExportWarehouseCorporation,
   IndustryJob,
   IndustryJobStatus,
   IndustryLedger,
@@ -39,6 +40,7 @@ import type {
   OrderDeskResponse,
   PLEXDashboard,
   PortfolioPnL,
+  PortfolioShippingRule,
   PortfolioOptimization,
   RegionOpportunities,
   RouteResult,
@@ -427,6 +429,11 @@ export async function getImportExportWarehouses(): Promise<ImportExportWarehouse
   return handleResponse<ImportExportWarehouse[]>(res);
 }
 
+export async function getImportExportWarehouseCorporations(): Promise<ImportExportWarehouseCorporation[]> {
+  const res = await apiFetch(`${BASE}/api/import-export/warehouse-corporations`);
+  return handleResponse<ImportExportWarehouseCorporation[]>(res);
+}
+
 export async function createImportExportWarehouse(payload: {
   name: string;
   system_id: number;
@@ -434,6 +441,9 @@ export async function createImportExportWarehouse(payload: {
   location_id: number;
   location_name: string;
   is_structure: boolean;
+  owner_kind: "character" | "corporation";
+  corporation_id: number;
+  corporation_name: string;
 }): Promise<ImportExportWarehouse> {
   const res = await apiFetch(`${BASE}/api/import-export/warehouses`, {
     method: "POST",
@@ -1532,6 +1542,51 @@ export async function getPortfolioPnL(days: number = 30, params?: PortfolioPnLPa
     ledger: data.ledger ?? [],
     open_positions: data.open_positions ?? [],
   };
+}
+
+export async function getPortfolioShippingRules(): Promise<PortfolioShippingRule[]> {
+  const res = await apiFetch(`${BASE}/api/auth/portfolio/shipping-rules`);
+  return handleResponse<PortfolioShippingRule[]>(res);
+}
+
+export async function createPortfolioShippingRule(payload: {
+  location_id: number;
+  location_name: string;
+  system_id: number;
+  system_name: string;
+  cost_per_m3: number;
+}): Promise<PortfolioShippingRule> {
+  const res = await apiFetch(`${BASE}/api/auth/portfolio/shipping-rules`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+  });
+  return handleResponse<PortfolioShippingRule>(res);
+}
+
+export async function updatePortfolioShippingRule(
+  ruleId: number,
+  payload: {
+    location_id: number;
+    location_name: string;
+    system_id: number;
+    system_name: string;
+    cost_per_m3: number;
+  },
+): Promise<PortfolioShippingRule> {
+  const res = await apiFetch(`${BASE}/api/auth/portfolio/shipping-rules/${ruleId}`, {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+  });
+  return handleResponse<PortfolioShippingRule>(res);
+}
+
+export async function deletePortfolioShippingRule(ruleId: number): Promise<{ ok: boolean }> {
+  const res = await apiFetch(`${BASE}/api/auth/portfolio/shipping-rules/${ruleId}`, {
+    method: "DELETE",
+  });
+  return handleResponse<{ ok: boolean }>(res);
 }
 
 export type OptimizerResult =

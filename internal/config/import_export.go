@@ -39,15 +39,18 @@ type ImportExportRouteItem struct {
 
 // ImportExportWarehouse represents a tracked storage location for restocking.
 type ImportExportWarehouse struct {
-	ID           int64  `json:"id"`
-	Name         string `json:"name"`
-	SystemID     int32  `json:"system_id"`
-	SystemName   string `json:"system_name"`
-	LocationID   int64  `json:"location_id"`
-	LocationName string `json:"location_name"`
-	IsStructure  bool   `json:"is_structure"`
-	CreatedAt    string `json:"created_at"`
-	UpdatedAt    string `json:"updated_at"`
+	ID              int64  `json:"id"`
+	Name            string `json:"name"`
+	SystemID        int32  `json:"system_id"`
+	SystemName      string `json:"system_name"`
+	LocationID      int64  `json:"location_id"`
+	LocationName    string `json:"location_name"`
+	IsStructure     bool   `json:"is_structure"`
+	OwnerKind       string `json:"owner_kind"`
+	CorporationID   int32  `json:"corporation_id"`
+	CorporationName string `json:"corporation_name"`
+	CreatedAt       string `json:"created_at"`
+	UpdatedAt       string `json:"updated_at"`
 }
 
 type ImportExportTransitItem struct {

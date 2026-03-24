@@ -4058,6 +4058,8 @@ function DayDetailPanel({
                             percentLabel: `${SCC_SURCHARGE_PERCENT.toFixed(1)}%`,
                           },
                         ];
+                        const showBuyFillChance =
+                          scenario.key === "buy_order_sell_order" || scenario.key === "buy_order_sell_order_structure";
                         return (
                           <>
                             <div className="rounded-sm border border-eve-border/40 bg-eve-dark/20 p-2 space-y-1">
@@ -4066,6 +4068,13 @@ function DayDetailPanel({
                               </div>
                               <DRRow label="Source" value={formatISK(scenario.source_price ?? 0)} />
                               <DRRow label="Source Gross" value={formatISK(scenarioAmount(scenario.source_gross ?? 0))} />
+                              {showBuyFillChance && (
+                                <DRRow
+                                  label="1+ Unit Fill (Est.)"
+                                  value={formatMargin(scenario.buy_fill_chance_percent ?? 0)}
+                                  accent={(scenario.buy_fill_chance_percent ?? 0) >= 50}
+                                />
+                              )}
                               <DRRow label="Buy Order Fees" value={
                                 <FeeValue
                                   total={scenarioAmount(scenario.buy_order_fees ?? 0)}

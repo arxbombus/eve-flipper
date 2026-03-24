@@ -730,6 +730,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("DELETE /api/import-export/routes/{id}/items/{itemID}", s.handleDeleteImportExportRouteItem)
 	mux.HandleFunc("GET /api/import-export/routes/{id}/analysis", s.handleAnalyzeImportExportRoute)
 	mux.HandleFunc("GET /api/import-export/warehouses", s.handleGetImportExportWarehouses)
+	mux.HandleFunc("GET /api/import-export/warehouse-corporations", s.handleGetImportExportWarehouseCorporations)
 	mux.HandleFunc("POST /api/import-export/warehouses", s.handleCreateImportExportWarehouse)
 	mux.HandleFunc("DELETE /api/import-export/warehouses/{warehouseID}", s.handleDeleteImportExportWarehouse)
 	mux.HandleFunc("GET /api/import-export/transit", s.handleGetImportExportTransitEntries)
@@ -782,6 +783,10 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /api/auth/station/ai/chat", s.handleAuthStationAIChat)
 	mux.HandleFunc("POST /api/auth/station/ai/chat/stream", s.handleAuthStationAIChatStream)
 	mux.HandleFunc("GET /api/auth/portfolio", s.handleAuthPortfolio)
+	mux.HandleFunc("GET /api/auth/portfolio/shipping-rules", s.handleGetPortfolioShippingRules)
+	mux.HandleFunc("POST /api/auth/portfolio/shipping-rules", s.handleCreatePortfolioShippingRule)
+	mux.HandleFunc("PUT /api/auth/portfolio/shipping-rules/{id}", s.handleUpdatePortfolioShippingRule)
+	mux.HandleFunc("DELETE /api/auth/portfolio/shipping-rules/{id}", s.handleDeletePortfolioShippingRule)
 	mux.HandleFunc("GET /api/auth/portfolio/optimize", s.handleAuthPortfolioOptimize)
 	mux.HandleFunc("GET /api/auth/structures", s.handleAuthStructures)
 	// UI operations (requires auth)
@@ -2266,24 +2271,35 @@ type importExportRouteResponse struct {
 	Items []config.ImportExportRouteItem `json:"items"`
 }
 
+type portfolioShippingRuleRequest struct {
+	LocationID   int64   `json:"location_id"`
+	LocationName string  `json:"location_name"`
+	SystemID     int32   `json:"system_id"`
+	SystemName   string  `json:"system_name"`
+	CostPerM3    float64 `json:"cost_per_m3"`
+}
+
 type importExportWarehouseRequest struct {
-	Name         string `json:"name"`
-	SystemID     int32  `json:"system_id"`
-	SystemName   string `json:"system_name"`
-	LocationID   int64  `json:"location_id"`
-	LocationName string `json:"location_name"`
-	IsStructure  bool   `json:"is_structure"`
+	Name            string `json:"name"`
+	SystemID        int32  `json:"system_id"`
+	SystemName      string `json:"system_name"`
+	LocationID      int64  `json:"location_id"`
+	LocationName    string `json:"location_name"`
+	IsStructure     bool   `json:"is_structure"`
+	OwnerKind       string `json:"owner_kind"`
+	CorporationID   int32  `json:"corporation_id"`
+	CorporationName string `json:"corporation_name"`
 }
 
 type importExportTransitEntryRequest struct {
-	FromSystemID     int32                             `json:"from_system_id"`
-	FromSystemName   string                            `json:"from_system_name"`
-	FromLocationID   int64  `json:"from_location_id"`
-	FromLocationName string `json:"from_location_name"`
-	ToSystemID       int32                             `json:"to_system_id"`
-	ToSystemName     string                            `json:"to_system_name"`
-	ToLocationID     int64  `json:"to_location_id"`
-	ToLocationName   string `json:"to_location_name"`
+	FromSystemID     int32                            `json:"from_system_id"`
+	FromSystemName   string                           `json:"from_system_name"`
+	FromLocationID   int64                            `json:"from_location_id"`
+	FromLocationName string                           `json:"from_location_name"`
+	ToSystemID       int32                            `json:"to_system_id"`
+	ToSystemName     string                           `json:"to_system_name"`
+	ToLocationID     int64                            `json:"to_location_id"`
+	ToLocationName   string                           `json:"to_location_name"`
 	Items            []importExportTransitItemRequest `json:"items"`
 }
 
@@ -2291,6 +2307,13 @@ type importExportTransitItemRequest struct {
 	TypeID   int32  `json:"type_id"`
 	TypeName string `json:"type_name"`
 	Quantity int64  `json:"quantity"`
+}
+
+type importExportWarehouseCorporation struct {
+	CorporationID   int32    `json:"corporation_id"`
+	CorporationName string   `json:"corporation_name"`
+	CharacterIDs    []int64  `json:"character_ids"`
+	CharacterNames  []string `json:"character_names"`
 }
 
 func (s *Server) parseImportExportRoute(req importExportRouteRequest) (config.ImportExportRoute, error) {
@@ -2423,6 +2446,102 @@ func (s *Server) handleDeleteImportExportRoute(w http.ResponseWriter, r *http.Re
 	writeJSON(w, map[string]bool{"ok": true})
 }
 
+func (s *Server) parsePortfolioShippingRule(req portfolioShippingRuleRequest) (config.PortfolioShippingRule, error) {
+	locationName := strings.TrimSpace(req.LocationName)
+	systemName := strings.TrimSpace(req.SystemName)
+	if req.LocationID <= 0 {
+		return config.PortfolioShippingRule{}, fmt.Errorf("location is required")
+	}
+	if req.SystemID <= 0 {
+		return config.PortfolioShippingRule{}, fmt.Errorf("system is required")
+	}
+	if locationName == "" {
+		locationName = fmt.Sprintf("Location %d", req.LocationID)
+	}
+	if systemName == "" {
+		systemName = fmt.Sprintf("System %d", req.SystemID)
+	}
+	if req.CostPerM3 < 0 {
+		return config.PortfolioShippingRule{}, fmt.Errorf("cost per m3 must be non-negative")
+	}
+	return config.PortfolioShippingRule{
+		LocationID:   req.LocationID,
+		LocationName: locationName,
+		SystemID:     req.SystemID,
+		SystemName:   systemName,
+		CostPerM3:    req.CostPerM3,
+	}, nil
+}
+
+func (s *Server) handleGetPortfolioShippingRules(w http.ResponseWriter, r *http.Request) {
+	userID := userIDFromRequest(r)
+	rules, err := s.db.ListPortfolioShippingRulesForUser(userID)
+	if err != nil {
+		writeError(w, 500, err.Error())
+		return
+	}
+	writeJSON(w, rules)
+}
+
+func (s *Server) handleCreatePortfolioShippingRule(w http.ResponseWriter, r *http.Request) {
+	userID := userIDFromRequest(r)
+	var req portfolioShippingRuleRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, 400, "invalid json")
+		return
+	}
+	rule, err := s.parsePortfolioShippingRule(req)
+	if err != nil {
+		writeError(w, 400, err.Error())
+		return
+	}
+	created, err := s.db.CreatePortfolioShippingRuleForUser(userID, rule)
+	if err != nil {
+		writeError(w, 500, err.Error())
+		return
+	}
+	writeJSON(w, created)
+}
+
+func (s *Server) handleUpdatePortfolioShippingRule(w http.ResponseWriter, r *http.Request) {
+	userID := userIDFromRequest(r)
+	ruleID, err := strconv.ParseInt(r.PathValue("id"), 10, 64)
+	if err != nil || ruleID <= 0 {
+		writeError(w, 400, "invalid shipping rule id")
+		return
+	}
+	var req portfolioShippingRuleRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, 400, "invalid json")
+		return
+	}
+	rule, err := s.parsePortfolioShippingRule(req)
+	if err != nil {
+		writeError(w, 400, err.Error())
+		return
+	}
+	updated, err := s.db.UpdatePortfolioShippingRuleForUser(userID, ruleID, rule)
+	if err != nil {
+		writeError(w, 500, err.Error())
+		return
+	}
+	writeJSON(w, updated)
+}
+
+func (s *Server) handleDeletePortfolioShippingRule(w http.ResponseWriter, r *http.Request) {
+	userID := userIDFromRequest(r)
+	ruleID, err := strconv.ParseInt(r.PathValue("id"), 10, 64)
+	if err != nil || ruleID <= 0 {
+		writeError(w, 400, "invalid shipping rule id")
+		return
+	}
+	if err := s.db.DeletePortfolioShippingRuleForUser(userID, ruleID); err != nil {
+		writeError(w, 500, err.Error())
+		return
+	}
+	writeJSON(w, map[string]bool{"ok": true})
+}
+
 func (s *Server) handleAddImportExportRouteItem(w http.ResponseWriter, r *http.Request) {
 	userID := userIDFromRequest(r)
 	routeID, err := strconv.ParseInt(r.PathValue("id"), 10, 64)
@@ -2540,6 +2659,53 @@ func (s *Server) handleGetImportExportWarehouses(w http.ResponseWriter, r *http.
 	writeJSON(w, warehouses)
 }
 
+func (s *Server) handleGetImportExportWarehouseCorporations(w http.ResponseWriter, r *http.Request) {
+	userID := userIDFromRequest(r)
+	if s.sessions == nil || s.esi == nil {
+		writeJSON(w, []importExportWarehouseCorporation{})
+		return
+	}
+
+	sessions := s.sessions.ListForUser(userID)
+	byCorp := make(map[int32]*importExportWarehouseCorporation)
+	for _, sess := range sessions {
+		if _, err := s.sessions.EnsureValidTokenForUserCharacter(s.sso, userID, sess.CharacterID); err != nil {
+			continue
+		}
+		corpID, err := s.esi.GetCharacterCorporationID(sess.CharacterID)
+		if err != nil || corpID <= 0 {
+			continue
+		}
+		entry := byCorp[corpID]
+		if entry == nil {
+			entry = &importExportWarehouseCorporation{CorporationID: corpID}
+			if info, infoErr := s.esi.GetCorporationInfo(corpID); infoErr == nil {
+				entry.CorporationName = strings.TrimSpace(info.CorporationName)
+			}
+			byCorp[corpID] = entry
+		}
+		entry.CharacterIDs = append(entry.CharacterIDs, sess.CharacterID)
+		entry.CharacterNames = append(entry.CharacterNames, sess.CharacterName)
+	}
+
+	out := make([]importExportWarehouseCorporation, 0, len(byCorp))
+	for _, corpEntry := range byCorp {
+		if corpEntry.CorporationName == "" {
+			corpEntry.CorporationName = strconv.FormatInt(int64(corpEntry.CorporationID), 10)
+		}
+		sort.Strings(corpEntry.CharacterNames)
+		sort.Slice(corpEntry.CharacterIDs, func(i, j int) bool { return corpEntry.CharacterIDs[i] < corpEntry.CharacterIDs[j] })
+		out = append(out, *corpEntry)
+	}
+	sort.Slice(out, func(i, j int) bool {
+		if out[i].CorporationName == out[j].CorporationName {
+			return out[i].CorporationID < out[j].CorporationID
+		}
+		return out[i].CorporationName < out[j].CorporationName
+	})
+	writeJSON(w, out)
+}
+
 func (s *Server) handleCreateImportExportWarehouse(w http.ResponseWriter, r *http.Request) {
 	userID := userIDFromRequest(r)
 	var req importExportWarehouseRequest
@@ -2548,12 +2714,15 @@ func (s *Server) handleCreateImportExportWarehouse(w http.ResponseWriter, r *htt
 		return
 	}
 	warehouse, err := s.db.CreateImportExportWarehouseForUser(userID, config.ImportExportWarehouse{
-		Name:         req.Name,
-		SystemID:     req.SystemID,
-		SystemName:   strings.TrimSpace(req.SystemName),
-		LocationID:   req.LocationID,
-		LocationName: strings.TrimSpace(req.LocationName),
-		IsStructure:  req.IsStructure,
+		Name:            req.Name,
+		SystemID:        req.SystemID,
+		SystemName:      strings.TrimSpace(req.SystemName),
+		LocationID:      req.LocationID,
+		LocationName:    strings.TrimSpace(req.LocationName),
+		IsStructure:     req.IsStructure,
+		OwnerKind:       req.OwnerKind,
+		CorporationID:   req.CorporationID,
+		CorporationName: strings.TrimSpace(req.CorporationName),
 	})
 	if err != nil {
 		writeError(w, 400, err.Error())
@@ -9956,6 +10125,21 @@ func (s *Server) handleAuthPortfolio(w http.ResponseWriter, r *http.Request) {
 			for i := range freshTxns {
 				if t, ok := sdeData.Types[freshTxns[i].TypeID]; ok {
 					freshTxns[i].TypeName = t.Name
+					freshTxns[i].VolumeM3 = t.Volume
+				}
+				if st, ok := sdeData.Stations[freshTxns[i].LocationID]; ok {
+					freshTxns[i].SystemID = st.SystemID
+					if freshTxns[i].LocationName == "" {
+						freshTxns[i].LocationName = s.esi.StationName(freshTxns[i].LocationID)
+					}
+				} else if freshTxns[i].LocationName == "" {
+					freshTxns[i].LocationName = s.esi.StationName(freshTxns[i].LocationID)
+				}
+				if freshTxns[i].SystemID == 0 {
+					_ = s.esi.StructureName(freshTxns[i].LocationID, token)
+					if sid, ok := s.esi.StructureSystemID(freshTxns[i].LocationID); ok {
+						freshTxns[i].SystemID = sid
+					}
 				}
 			}
 		}
@@ -9985,12 +10169,25 @@ func (s *Server) handleAuthPortfolio(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	rules, err := s.db.ListPortfolioShippingRulesForUser(userID)
+	if err != nil {
+		writeError(w, 500, err.Error())
+		return
+	}
+	shippingRulesByLocation := make(map[int64]float64, len(rules))
+	for _, rule := range rules {
+		if rule.LocationID > 0 && rule.CostPerM3 > 0 {
+			shippingRulesByLocation[rule.LocationID] = rule.CostPerM3
+		}
+	}
+
 	result := engine.ComputePortfolioPnLWithOptions(txns, engine.PortfolioPnLOptions{
-		LookbackDays:         days,
-		SalesTaxPercent:      salesTax,
-		BrokerFeePercent:     brokerFee,
-		LedgerLimit:          ledgerLimit,
-		IncludeUnmatchedSell: false, // strict realized mode for API
+		LookbackDays:            days,
+		SalesTaxPercent:         salesTax,
+		BrokerFeePercent:        brokerFee,
+		LedgerLimit:             ledgerLimit,
+		ShippingRulesByLocation: shippingRulesByLocation,
+		IncludeUnmatchedSell:    false, // strict realized mode for API
 	})
 	writeJSON(w, result)
 }

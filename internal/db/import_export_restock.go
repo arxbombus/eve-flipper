@@ -12,6 +12,16 @@ func normalizeImportExportWarehouse(warehouse config.ImportExportWarehouse) conf
 	warehouse.Name = strings.TrimSpace(warehouse.Name)
 	warehouse.SystemName = strings.TrimSpace(warehouse.SystemName)
 	warehouse.LocationName = strings.TrimSpace(warehouse.LocationName)
+	warehouse.OwnerKind = strings.ToLower(strings.TrimSpace(warehouse.OwnerKind))
+	warehouse.CorporationName = strings.TrimSpace(warehouse.CorporationName)
+	if warehouse.OwnerKind == "" {
+		warehouse.OwnerKind = "character"
+	}
+	if warehouse.OwnerKind != "corporation" {
+		warehouse.OwnerKind = "character"
+		warehouse.CorporationID = 0
+		warehouse.CorporationName = ""
+	}
 	if warehouse.Name == "" {
 		warehouse.Name = warehouse.LocationName
 	}
@@ -32,7 +42,8 @@ func normalizeImportExportTransitEntry(entry config.ImportExportTransitEntry) co
 func (d *DB) ListImportExportWarehousesForUser(userID string) ([]config.ImportExportWarehouse, error) {
 	userID = normalizeUserID(userID)
 	rows, err := d.sql.Query(`
-		SELECT id, name, system_id, system_name, location_id, location_name, is_structure, created_at, updated_at
+		SELECT id, name, system_id, system_name, location_id, location_name, is_structure,
+		       owner_kind, corporation_id, corporation_name, created_at, updated_at
 		  FROM import_export_warehouses
 		 WHERE user_id = ?
 		 ORDER BY updated_at DESC, id DESC
@@ -53,6 +64,9 @@ func (d *DB) ListImportExportWarehousesForUser(userID string) ([]config.ImportEx
 			&warehouse.LocationID,
 			&warehouse.LocationName,
 			&warehouse.IsStructure,
+			&warehouse.OwnerKind,
+			&warehouse.CorporationID,
+			&warehouse.CorporationName,
 			&warehouse.CreatedAt,
 			&warehouse.UpdatedAt,
 		); err != nil {
@@ -78,12 +92,16 @@ func (d *DB) CreateImportExportWarehouseForUser(userID string, warehouse config.
 	if warehouse.SystemName == "" || warehouse.LocationName == "" {
 		return config.ImportExportWarehouse{}, errors.New("system and location names are required")
 	}
+	if warehouse.OwnerKind == "corporation" && warehouse.CorporationID <= 0 {
+		return config.ImportExportWarehouse{}, errors.New("corporation warehouses require a corporation")
+	}
 	now := time.Now().UTC().Format(time.RFC3339)
 	res, err := d.sql.Exec(`
 		INSERT INTO import_export_warehouses (
-			user_id, name, system_id, system_name, location_id, location_name, is_structure, created_at, updated_at
-		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-	`, userID, warehouse.Name, warehouse.SystemID, warehouse.SystemName, warehouse.LocationID, warehouse.LocationName, warehouse.IsStructure, now, now)
+			user_id, name, system_id, system_name, location_id, location_name, is_structure,
+			owner_kind, corporation_id, corporation_name, created_at, updated_at
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+	`, userID, warehouse.Name, warehouse.SystemID, warehouse.SystemName, warehouse.LocationID, warehouse.LocationName, warehouse.IsStructure, warehouse.OwnerKind, warehouse.CorporationID, warehouse.CorporationName, now, now)
 	if err != nil {
 		return config.ImportExportWarehouse{}, err
 	}

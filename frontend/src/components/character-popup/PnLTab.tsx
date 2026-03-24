@@ -2,6 +2,7 @@ import { useEffect, useState } from "react";
 import { getPortfolioPnL, type CharacterScope } from "../../lib/api";
 import { type TranslationKey } from "../../lib/i18n";
 import type { ItemPnL, PortfolioPnL, StationPnL } from "../../lib/types";
+import { Modal } from "../Modal";
 import { StatCard } from "./shared";
 type PnLPeriod = 7 | 30 | 90 | 180;
 
@@ -21,6 +22,7 @@ export function PnLTab({ formatIsk, characterScope, t }: PnLTabProps) {
   const [chartMode, setChartMode] = useState<"daily" | "cumulative" | "drawdown">("daily");
   const [itemView, setItemView] = useState<"profit" | "loss">("profit");
   const [bottomView, setBottomView] = useState<"items" | "stations">("items");
+  const [ledgerModalOpen, setLedgerModalOpen] = useState(false);
 
   useEffect(() => {
     setLoading(true);
@@ -158,6 +160,21 @@ export function PnLTab({ formatIsk, characterScope, t }: PnLTabProps) {
         <StatCard
           label={t("pnlTotalSold")}
           value={`${formatIsk(summary.total_sold)} ISK`}
+        />
+      </div>
+
+      <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
+        <StatCard
+          label={t("pnlShippingTotal")}
+          value={summary.total_shipping > 0 ? `-${formatIsk(summary.total_shipping)} ISK` : "—"}
+          subvalue={t("pnlShippingHint")}
+          color={summary.total_shipping > 0 ? "text-eve-warning" : "text-eve-dim"}
+        />
+        <StatCard
+          label={t("pnlShippingRules")}
+          value={`${data.settings?.shipping_rule_count ?? 0}`}
+          subvalue={t("charShippingRules").toLowerCase()}
+          color={(data.settings?.shipping_rule_count ?? 0) > 0 ? "text-eve-accent" : "text-eve-dim"}
         />
       </div>
 
@@ -324,8 +341,17 @@ export function PnLTab({ formatIsk, characterScope, t }: PnLTabProps) {
 
       {/* Realized ledger */}
       <div className="bg-eve-panel border border-eve-border rounded-sm p-3">
-        <div className="text-[10px] text-eve-dim uppercase tracking-wider mb-2">
-          {t("pnlRealizedLedger")} ({data.ledger?.length ?? 0})
+        <div className="mb-2 flex items-center justify-between gap-3">
+          <div className="text-[10px] text-eve-dim uppercase tracking-wider">
+            {t("pnlRealizedLedger")} ({data.ledger?.length ?? 0})
+          </div>
+          <button
+            type="button"
+            onClick={() => setLedgerModalOpen(true)}
+            className="rounded-sm border border-eve-border bg-eve-dark/70 px-2 py-1 text-[10px] text-eve-dim transition-colors hover:border-eve-accent/50 hover:text-eve-accent"
+          >
+            {t("pnlOpenFullLedger")}
+          </button>
         </div>
         <PnLLedgerTable ledger={data.ledger ?? []} formatIsk={formatIsk} t={t} />
       </div>
@@ -337,6 +363,12 @@ export function PnLTab({ formatIsk, characterScope, t }: PnLTabProps) {
         </div>
         <PnLOpenPositionsTable positions={data.open_positions ?? []} formatIsk={formatIsk} t={t} />
       </div>
+
+      <Modal open={ledgerModalOpen} onClose={() => setLedgerModalOpen(false)} title={t("pnlRealizedLedger")} width="max-w-[96vw]">
+        <div className="p-4">
+          <PnLLedgerTable ledger={data.ledger ?? []} formatIsk={formatIsk} t={t} full />
+        </div>
+      </Modal>
     </div>
   );
 }
@@ -703,42 +735,50 @@ function PnLLedgerTable({
   ledger,
   formatIsk,
   t,
+  full = false,
 }: {
   ledger: PortfolioPnL["ledger"];
   formatIsk: (v: number) => string;
   t: (key: TranslationKey, params?: Record<string, string | number>) => string;
+  full?: boolean;
 }) {
   if (!ledger || ledger.length === 0) {
     return <div className="text-center text-eve-dim text-xs py-4">{t("pnlNoData")}</div>;
   }
 
+  const rows = full ? ledger : ledger.slice(0, 120);
+
   return (
-    <div className="border border-eve-border rounded-sm overflow-hidden">
+    <div className="border border-eve-border rounded-sm overflow-auto">
       <table className="w-full text-xs">
         <thead className="bg-eve-panel">
           <tr className="text-eve-dim">
             <th className="px-2 py-1.5 text-left">{t("pnlLedgerDate")}</th>
+            <th className="px-2 py-1.5 text-left">{t("pnlLedgerTime")}</th>
             <th className="px-2 py-1.5 text-left">{t("pnlLedgerItem")}</th>
             <th className="px-2 py-1.5 text-right">{t("pnlLedgerQty")}</th>
             <th className="px-2 py-1.5 text-right">{t("pnlLedgerBuy")}</th>
             <th className="px-2 py-1.5 text-right">{t("pnlLedgerSell")}</th>
+            <th className="px-2 py-1.5 text-right">{t("pnlLedgerShipping")}</th>
             <th className="px-2 py-1.5 text-right">{t("pnlLedgerHold")}</th>
             <th className="px-2 py-1.5 text-right">{t("pnlLedgerPnl")}</th>
             <th className="px-2 py-1.5 text-right">{t("pnlLedgerMargin")}</th>
           </tr>
         </thead>
         <tbody>
-          {ledger.slice(0, 120).map((row, idx) => {
+          {rows.map((row, idx) => {
             const isProfit = (row.realized_pnl ?? 0) >= 0;
             return (
               <tr key={`${row.sell_transaction_id}-${row.buy_transaction_id}-${idx}`} className="border-t border-eve-border/50 hover:bg-eve-panel/50">
                 <td className="px-2 py-1.5 text-eve-dim">{(row.sell_date ?? "").slice(0, 10)}</td>
+                <td className="px-2 py-1.5 text-eve-dim">{(row.sell_date ?? "").slice(11, 16) || "—"}</td>
                 <td className="px-2 py-1.5 text-eve-text truncate max-w-[220px]" title={row.type_name}>
                   {row.type_name || `#${row.type_id}`}
                 </td>
                 <td className="px-2 py-1.5 text-right text-eve-dim">{(row.quantity ?? 0).toLocaleString()}</td>
                 <td className="px-2 py-1.5 text-right text-eve-dim">{formatIsk(row.buy_total ?? 0)}</td>
                 <td className="px-2 py-1.5 text-right text-eve-dim">{formatIsk(row.sell_total ?? 0)}</td>
+                <td className="px-2 py-1.5 text-right text-eve-warning">{(row.shipping_cost ?? 0) > 0 ? `-${formatIsk(row.shipping_cost ?? 0)}` : "—"}</td>
                 <td className="px-2 py-1.5 text-right text-eve-dim">{row.holding_days ?? 0}d</td>
                 <td className={`px-2 py-1.5 text-right ${isProfit ? "text-eve-profit" : "text-eve-error"}`}>
                   {isProfit ? "+" : ""}{formatIsk(row.realized_pnl ?? 0)}
@@ -751,7 +791,7 @@ function PnLLedgerTable({
           })}
         </tbody>
       </table>
-      {ledger.length > 120 && (
+      {!full && ledger.length > 120 && (
         <div className="text-center text-eve-dim text-xs py-2 bg-eve-panel">
           {t("andMore", { count: ledger.length - 120 })}
         </div>

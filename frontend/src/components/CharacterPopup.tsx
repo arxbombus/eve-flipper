@@ -13,6 +13,7 @@ import {
   OverviewTab,
   PnLTab,
   RiskTab,
+  ShippingTab,
   TabBtn,
   TransactionsTab,
 } from "./character-popup/CharacterPopupTabs";
@@ -28,7 +29,7 @@ interface CharacterPopupProps {
   onAuthRefresh: () => Promise<void>;
 }
 
-type CharTab = "overview" | "orders" | "transactions" | "pnl" | "risk" | "optimizer";
+type CharTab = "overview" | "orders" | "transactions" | "pnl" | "shipping" | "risk" | "optimizer";
 const SCOPE_COLLAPSE_KEY = "eve-character-scope-collapsed";
 
 export function CharacterPopup({
@@ -194,8 +195,8 @@ export function CharacterPopup({
   const totalSold = sellTxns.reduce((sum, t) => sum + t.unit_price * t.quantity, 0);
 
   return (
-    <Modal open={open} onClose={onClose} title={modalTitle} width="max-w-5xl">
-      <div className="flex flex-col h-[70vh]">
+    <Modal open={open} onClose={onClose} title={modalTitle} width="max-w-7xl">
+      <div className="flex flex-col h-[82vh]">
         {/* Character selector */}
         <div className="border-b border-eve-border bg-gradient-to-r from-eve-panel/90 to-eve-dark/70 px-4 py-3 space-y-2.5">
           <div className="flex items-center justify-between gap-2">
@@ -294,6 +295,7 @@ export function CharacterPopup({
             <TabBtn active={tab === "orders"} onClick={() => setTab("orders")} label={`${t("charOrders")} (${data?.orders.length ?? 0})`} />
             <TabBtn active={tab === "transactions"} onClick={() => setTab("transactions")} label={`${t("charTransactions")} (${data?.transactions?.length ?? 0})`} />
             <TabBtn active={tab === "pnl"} onClick={() => setTab("pnl")} label={t("charPnlTab")} />
+            <TabBtn active={tab === "shipping"} onClick={() => setTab("shipping")} label={t("charShippingTab")} />
             <TabBtn active={tab === "risk"} onClick={() => setTab("risk")} label={t("charRiskTab")} />
             <TabBtn active={tab === "optimizer"} onClick={() => setTab("optimizer")} label={t("charOptimizerTab")} />
           </div>
@@ -354,6 +356,9 @@ export function CharacterPopup({
               {tab === "pnl" && (
                 <PnLTab formatIsk={formatIsk} characterScope={selectedScope} t={t} />
               )}
+              {tab === "shipping" && (
+                <ShippingTab isLoggedIn={characters.length > 0} t={t} />
+              )}
               {tab === "risk" && (
                 <RiskTab
                   characterId={selectedScope === "all" ? undefined : selectedScope}
@@ -373,4 +378,3 @@ export function CharacterPopup({
     </Modal>
   );
 }
-

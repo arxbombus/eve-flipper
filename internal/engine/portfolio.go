@@ -23,11 +23,12 @@ type PortfolioPnL struct {
 
 // PortfolioPnLOptions controls realized P&L matching behavior.
 type PortfolioPnLOptions struct {
-	LookbackDays         int
-	SalesTaxPercent      float64
-	BrokerFeePercent     float64
-	LedgerLimit          int
-	IncludeUnmatchedSell bool // legacy mode: treat unmatched sells as zero-cost proceeds
+	LookbackDays            int
+	SalesTaxPercent         float64
+	BrokerFeePercent        float64
+	LedgerLimit             int
+	ShippingRulesByLocation map[int64]float64
+	IncludeUnmatchedSell    bool // legacy mode: treat unmatched sells as zero-cost proceeds
 }
 
 // PortfolioSettings is echoed back in API responses for traceability.
@@ -36,6 +37,7 @@ type PortfolioSettings struct {
 	SalesTaxPercent      float64 `json:"sales_tax_percent"`
 	BrokerFeePercent     float64 `json:"broker_fee_percent"`
 	LedgerLimit          int     `json:"ledger_limit"`
+	ShippingRuleCount    int     `json:"shipping_rule_count"`
 	IncludeUnmatchedSell bool    `json:"include_unmatched_sell"`
 }
 
@@ -74,6 +76,7 @@ type RealizedTrade struct {
 	SellTax           float64 `json:"sell_tax"`
 	BuyTotal          float64 `json:"buy_total"`
 	SellTotal         float64 `json:"sell_total"`
+	ShippingCost      float64 `json:"shipping_cost"`
 	RealizedPnL       float64 `json:"realized_pnl"`
 	MarginPercent     float64 `json:"margin_percent"`
 	Unmatched         bool    `json:"unmatched,omitempty"`
@@ -96,6 +99,7 @@ type DailyPnLEntry struct {
 	Date          string  `json:"date"` // YYYY-MM-DD
 	BuyTotal      float64 `json:"buy_total"`
 	SellTotal     float64 `json:"sell_total"`
+	ShippingTotal float64 `json:"shipping_total"`
 	NetPnL        float64 `json:"net_pnl"`
 	CumulativePnL float64 `json:"cumulative_pnl"`
 	DrawdownPct   float64 `json:"drawdown_pct"` // drawdown from cumulative peak (0 to -100)
@@ -136,16 +140,18 @@ type PortfolioPnLStats struct {
 	OpenCostBasis    float64 `json:"open_cost_basis"`
 	TotalFees        float64 `json:"total_fees"`
 	TotalTaxes       float64 `json:"total_taxes"`
+	TotalShipping    float64 `json:"total_shipping"`
 }
 
 // StationPnL is a per-station breakdown of trading activity.
 type StationPnL struct {
-	LocationID   int64   `json:"location_id"`
-	LocationName string  `json:"location_name"`
-	TotalBought  float64 `json:"total_bought"`
-	TotalSold    float64 `json:"total_sold"`
-	NetPnL       float64 `json:"net_pnl"`
-	Transactions int     `json:"transactions"`
+	LocationID    int64   `json:"location_id"`
+	LocationName  string  `json:"location_name"`
+	TotalBought   float64 `json:"total_bought"`
+	TotalSold     float64 `json:"total_sold"`
+	ShippingTotal float64 `json:"shipping_total"`
+	NetPnL        float64 `json:"net_pnl"`
+	Transactions  int     `json:"transactions"`
 }
 
 // ItemPnL is the per-item breakdown of trading activity.
@@ -154,6 +160,7 @@ type ItemPnL struct {
 	TypeName      string  `json:"type_name"`
 	TotalBought   float64 `json:"total_bought"`
 	TotalSold     float64 `json:"total_sold"`
+	ShippingTotal float64 `json:"shipping_total"`
 	NetPnL        float64 `json:"net_pnl"`
 	QtyBought     int64   `json:"qty_bought"`
 	QtySold       int64   `json:"qty_sold"`
@@ -175,7 +182,9 @@ type portfolioBuyLot struct {
 	TypeName      string
 	LocationID    int64
 	LocationName  string
+	SystemID      int32
 	UnitPrice     float64
+	VolumeM3      float64
 	Remaining     int32
 }
 
@@ -233,6 +242,7 @@ func ComputePortfolioPnLWithOptions(txns []esi.WalletTransaction, opt PortfolioP
 			SalesTaxPercent:      opt.SalesTaxPercent,
 			BrokerFeePercent:     opt.BrokerFeePercent,
 			LedgerLimit:          opt.LedgerLimit,
+			ShippingRuleCount:    len(opt.ShippingRulesByLocation),
 			IncludeUnmatchedSell: opt.IncludeUnmatchedSell,
 		},
 	}
@@ -319,7 +329,9 @@ func ComputePortfolioPnLWithOptions(txns []esi.WalletTransaction, opt PortfolioP
 				TypeName:      tx.TypeName,
 				LocationID:    tx.LocationID,
 				LocationName:  tx.LocationName,
+				SystemID:      tx.SystemID,
 				UnitPrice:     tx.UnitPrice,
+				VolumeM3:      tx.VolumeM3,
 				Remaining:     tx.Quantity,
 			})
 			continue
@@ -358,8 +370,14 @@ func ComputePortfolioPnLWithOptions(txns []esi.WalletTransaction, opt PortfolioP
 			sellBrokerFee := sellGross * opt.BrokerFeePercent / 100.0
 			sellTax := sellGross * opt.SalesTaxPercent / 100.0
 			sellTotal := sellGross - sellBrokerFee - sellTax
+			shippingCost := 0.0
+			if matched > 0 && lot.LocationID != tx.LocationID {
+				if rate, ok := opt.ShippingRulesByLocation[tx.LocationID]; ok && rate > 0 && lot.VolumeM3 > 0 {
+					shippingCost = lot.VolumeM3 * float64(matched) * rate
+				}
+			}
 
-			pnl := sellTotal - buyTotal
+			pnl := sellTotal - buyTotal - shippingCost
 			margin := 0.0
 			if buyTotal > 0 {
 				margin = pnl / buyTotal * 100
@@ -373,11 +391,13 @@ func ComputePortfolioPnLWithOptions(txns []esi.WalletTransaction, opt PortfolioP
 			day := addDay(rec.t.Format("2006-01-02"))
 			day.BuyTotal += buyTotal
 			day.SellTotal += sellTotal
+			day.ShippingTotal += shippingCost
 			day.Transactions++
 
 			item := addItem(tx.TypeID, tx.TypeName)
 			item.TotalBought += buyTotal
 			item.TotalSold += sellTotal
+			item.ShippingTotal += shippingCost
 			item.QtyBought += int64(matched)
 			item.QtySold += int64(matched)
 			item.Transactions++
@@ -387,6 +407,7 @@ func ComputePortfolioPnLWithOptions(txns []esi.WalletTransaction, opt PortfolioP
 			buySt.Transactions++
 			sellSt := addStation(tx.LocationID, tx.LocationName)
 			sellSt.TotalSold += sellTotal
+			sellSt.ShippingTotal += shippingCost
 			sellSt.Transactions++
 
 			coverage.MatchedSellQty += int64(matched)
@@ -396,6 +417,7 @@ func ComputePortfolioPnLWithOptions(txns []esi.WalletTransaction, opt PortfolioP
 			summary.RealizedQuantity += int64(matched)
 			summary.TotalFees += buyFee + sellBrokerFee
 			summary.TotalTaxes += sellTax
+			summary.TotalShipping += shippingCost
 
 			ledger = append(ledger, RealizedTrade{
 				TypeID:            tx.TypeID,
@@ -419,6 +441,7 @@ func ComputePortfolioPnLWithOptions(txns []esi.WalletTransaction, opt PortfolioP
 				SellTax:           sellTax,
 				BuyTotal:          buyTotal,
 				SellTotal:         sellTotal,
+				ShippingCost:      shippingCost,
 				RealizedPnL:       pnl,
 				MarginPercent:     margin,
 			})
@@ -498,6 +521,7 @@ func ComputePortfolioPnLWithOptions(txns []esi.WalletTransaction, opt PortfolioP
 	days := make([]DailyPnLEntry, 0, len(dayMap))
 	for _, entry := range dayMap {
 		entry.NetPnL = entry.SellTotal - entry.BuyTotal
+		entry.NetPnL -= entry.ShippingTotal
 		days = append(days, *entry)
 	}
 	sort.Slice(days, func(i, j int) bool {
@@ -642,6 +666,7 @@ func ComputePortfolioPnLWithOptions(txns []esi.WalletTransaction, opt PortfolioP
 	items := make([]ItemPnL, 0, len(itemMap))
 	for _, item := range itemMap {
 		item.NetPnL = item.TotalSold - item.TotalBought
+		item.NetPnL -= item.ShippingTotal
 		if item.QtyBought > 0 {
 			item.AvgBuyPrice = item.TotalBought / float64(item.QtyBought)
 		}
@@ -672,6 +697,7 @@ func ComputePortfolioPnLWithOptions(txns []esi.WalletTransaction, opt PortfolioP
 	stations := make([]StationPnL, 0, len(stationMap))
 	for _, st := range stationMap {
 		st.NetPnL = st.TotalSold - st.TotalBought
+		st.NetPnL -= st.ShippingTotal
 		stations = append(stations, *st)
 	}
 	sort.Slice(stations, func(i, j int) bool {

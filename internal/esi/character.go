@@ -48,9 +48,11 @@ type WalletTransaction struct {
 	Date          string  `json:"date"`
 	TypeID        int32   `json:"type_id"`
 	LocationID    int64   `json:"location_id"`
+	SystemID      int32   `json:"system_id,omitempty"`
 	UnitPrice     float64 `json:"unit_price"`
 	Quantity      int32   `json:"quantity"`
 	IsBuy         bool    `json:"is_buy"`
+	VolumeM3      float64 `json:"volume_m3,omitempty"`
 	// Enriched fields
 	TypeName     string `json:"type_name,omitempty"`
 	LocationName string `json:"location_name,omitempty"`
@@ -66,6 +68,24 @@ type CharacterAsset struct {
 	Quantity        int64  `json:"quantity"`
 	IsSingleton     bool   `json:"is_singleton"`
 	IsBlueprintCopy bool   `json:"is_blueprint_copy"`
+}
+
+// CorporationAsset represents an asset row from corporation inventory.
+type CorporationAsset struct {
+	ItemID          int64  `json:"item_id"`
+	TypeID          int32  `json:"type_id"`
+	LocationID      int64  `json:"location_id"`
+	LocationType    string `json:"location_type"`
+	LocationFlag    string `json:"location_flag"`
+	Quantity        int64  `json:"quantity"`
+	IsSingleton     bool   `json:"is_singleton"`
+	IsBlueprintCopy bool   `json:"is_blueprint_copy"`
+}
+
+// CorporationInfo represents basic corporation identity.
+type CorporationInfo struct {
+	CorporationID   int32  `json:"corporation_id"`
+	CorporationName string `json:"corporation_name"`
 }
 
 // CharacterBlueprint represents a blueprint owned by character.
@@ -263,11 +283,20 @@ func (c *Client) GetWalletTransactions(characterID int64, accessToken string) ([
 // GetCharacterAssets fetches all pages of character assets.
 func (c *Client) GetCharacterAssets(characterID int64, accessToken string) ([]CharacterAsset, error) {
 	assetsURL := fmt.Sprintf("%s/characters/%d/assets/?datasource=tranquility", baseURL, characterID)
+	return fetchPagedAuthenticatedJSON[CharacterAsset](c, assetsURL, accessToken)
+}
 
+// GetCorporationAssets fetches all pages of corporation assets.
+func (c *Client) GetCorporationAssets(corporationID int32, accessToken string) ([]CorporationAsset, error) {
+	assetsURL := fmt.Sprintf("%s/corporations/%d/assets/?datasource=tranquility", baseURL, corporationID)
+	return fetchPagedAuthenticatedJSON[CorporationAsset](c, assetsURL, accessToken)
+}
+
+func fetchPagedAuthenticatedJSON[T any](c *Client, pageURLBase, accessToken string) ([]T, error) {
 	// Fetch page 1 to discover total pages.
 	c.sem <- struct{}{}
 
-	req, err := http.NewRequest("GET", assetsURL+"&page=1", nil)
+	req, err := http.NewRequest("GET", pageURLBase+"&page=1", nil)
 	if err != nil {
 		<-c.sem
 		return nil, err
@@ -296,7 +325,7 @@ func (c *Client) GetCharacterAssets(characterID int64, accessToken string) ([]Ch
 		return nil, fmt.Errorf("assets: ESI %d: %s", resp.StatusCode, string(body))
 	}
 
-	var page1 []CharacterAsset
+	var page1 []T
 	decErr := json.NewDecoder(resp.Body).Decode(&page1)
 	resp.Body.Close()
 	<-c.sem
@@ -309,15 +338,15 @@ func (c *Client) GetCharacterAssets(characterID int64, accessToken string) ([]Ch
 	}
 
 	type pageResult struct {
-		data []CharacterAsset
+		data []T
 		err  error
 	}
 	results := make(chan pageResult, totalPages-1)
 
 	for p := 2; p <= totalPages; p++ {
 		go func(pageNum int) {
-			pageURL := fmt.Sprintf("%s&page=%d", assetsURL, pageNum)
-			var data []CharacterAsset
+			pageURL := fmt.Sprintf("%s&page=%d", pageURLBase, pageNum)
+			var data []T
 			if fetchErr := c.AuthGetJSON(pageURL, accessToken, &data); fetchErr != nil {
 				results <- pageResult{err: fetchErr}
 				return
@@ -326,7 +355,7 @@ func (c *Client) GetCharacterAssets(characterID int64, accessToken string) ([]Ch
 		}(p)
 	}
 
-	all := make([]CharacterAsset, 0, len(page1)*totalPages)
+	all := make([]T, 0, len(page1)*totalPages)
 	all = append(all, page1...)
 	for i := 0; i < totalPages-1; i++ {
 		r := <-results
@@ -336,6 +365,21 @@ func (c *Client) GetCharacterAssets(characterID int64, accessToken string) ([]Ch
 		all = append(all, r.data...)
 	}
 	return all, nil
+}
+
+// GetCorporationInfo fetches basic public corporation identity.
+func (c *Client) GetCorporationInfo(corporationID int32) (*CorporationInfo, error) {
+	url := fmt.Sprintf("%s/corporations/%d/?datasource=tranquility", baseURL, corporationID)
+	var info struct {
+		Name string `json:"name"`
+	}
+	if err := c.GetJSON(url, &info); err != nil {
+		return nil, fmt.Errorf("corporation info: %w", err)
+	}
+	return &CorporationInfo{
+		CorporationID:   corporationID,
+		CorporationName: info.Name,
+	}, nil
 }
 
 // GetCharacterBlueprints fetches all pages of character blueprints.

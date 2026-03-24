@@ -14,6 +14,7 @@ import {
   getImportExportRoutes,
   getImportExportRestockingOverview,
   getImportExportTransitEntries,
+  getImportExportWarehouseCorporations,
   getImportExportWarehouses,
   getStations,
   getStructures,
@@ -31,6 +32,7 @@ import type {
   ImportExportTransitItem,
   ImportExportTransitEntry,
   ImportExportWarehouse,
+  ImportExportWarehouseCorporation,
   ItemSearchResult,
   RegionalTradeMode,
   StationInfo,
@@ -93,6 +95,9 @@ type WarehouseFormState = {
   location_name: string;
   is_structure: boolean;
   include_structures: boolean;
+  owner_kind: "character" | "corporation";
+  corporation_id: number;
+  corporation_name: string;
 };
 
 type TransitEndpointState = {
@@ -134,6 +139,9 @@ const DEFAULT_WAREHOUSE_FORM: WarehouseFormState = {
   location_name: "",
   is_structure: false,
   include_structures: false,
+  owner_kind: "character",
+  corporation_id: 0,
+  corporation_name: "",
 };
 
 const DEFAULT_TRANSIT_ENDPOINT: TransitEndpointState = {
@@ -215,18 +223,61 @@ function parseDemandDaysDraft(raw: string): number | null | "invalid" {
 }
 
 function formatTransitClipboardInput(raw: string) {
-  return raw.replace(/\r/g, " ").replace(/\n/g, " ").trim();
+  return raw
+    .replace(/\u00a0/g, " ")
+    .replace(/\r/g, " ")
+    .replace(/\n/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
 }
 
 function parseTransitClipboard(raw: string) {
   const normalized = formatTransitClipboardInput(raw);
-  const matches = Array.from(normalized.matchAll(/(.+?)\s*x\s*([\d,]+)(?=[^\d]|$)/gi));
-  return matches
-    .map((match) => ({
-      type_name: match[1]?.trim() ?? "",
-      quantity: Number((match[2] ?? "").replace(/,/g, "")),
-    }))
-    .filter((entry) => entry.type_name.length > 0 && Number.isFinite(entry.quantity) && entry.quantity > 0);
+  if (!normalized) {
+    return { entries: [], errors: ["Clipboard is empty."] };
+  }
+
+  const errors: string[] = [];
+  const entries: Array<{ type_name: string; quantity: number }> = [];
+  const matcher = /(.+?)\s+x\s*([\d,]+)(?=[^\d]|$)/gi;
+  const quantityPattern = /^(?:\d+|\d{1,3}(?:,\d{3})+)$/;
+  let cursor = 0;
+
+  for (const match of normalized.matchAll(matcher)) {
+    const matchStart = match.index ?? 0;
+    const gap = normalized.slice(cursor, matchStart).trim();
+    if (gap) {
+      errors.push(`Unparsed text near "${gap.slice(0, 40)}".`);
+    }
+
+    const typeName = match[1]?.trim() ?? "";
+    const quantityText = match[2]?.trim() ?? "";
+    if (!typeName) {
+      errors.push(`Missing item name before quantity "${quantityText || "?"}".`);
+    } else if (!quantityPattern.test(quantityText)) {
+      errors.push(`Invalid quantity "${quantityText}" for "${typeName}".`);
+    } else {
+      const quantity = Number(quantityText.replace(/,/g, ""));
+      if (!Number.isFinite(quantity) || quantity <= 0) {
+        errors.push(`Invalid quantity "${quantityText}" for "${typeName}".`);
+      } else {
+        entries.push({ type_name: typeName, quantity });
+      }
+    }
+
+    cursor = matchStart + match[0].length;
+  }
+
+  const trailing = normalized.slice(cursor).trim();
+  if (trailing) {
+    errors.push(`Unparsed text near "${trailing.slice(0, 40)}".`);
+  }
+
+  if (entries.length === 0 && errors.length === 0) {
+    errors.push('Could not find any "<item> x <quantity>" entries.');
+  }
+
+  return { entries, errors };
 }
 
 function normalizeItemName(raw: string) {
@@ -276,6 +327,7 @@ export function ImportExportTab({ isLoggedIn }: Props) {
   const [activeSubtab, setActiveSubtab] = useState<ImportExportSubtab>("routes");
   const [restockingOverview, setRestockingOverview] = useState<ImportExportRestockingOverview | null>(null);
   const [restockingStale, setRestockingStale] = useState(false);
+  const [loadingRestocking, setLoadingRestocking] = useState(false);
   const [restockQuery, setRestockQuery] = useState("");
   const [restockFilter, setRestockFilter] = useState<RestockFilterMode>("all");
   const [restockSort, setRestockSort] = useState<RestockSortMode>("restock_desc");
@@ -283,6 +335,7 @@ export function ImportExportTab({ isLoggedIn }: Props) {
   const [collapsedRestockGroupKeys, setCollapsedRestockGroupKeys] = useState<string[]>([]);
   const [selectedRestockTypeID, setSelectedRestockTypeID] = useState<number | null>(null);
   const [warehouses, setWarehouses] = useState<ImportExportWarehouse[]>([]);
+  const [warehouseCorporations, setWarehouseCorporations] = useState<ImportExportWarehouseCorporation[]>([]);
   const [transitEntries, setTransitEntries] = useState<ImportExportTransitEntry[]>([]);
   const [warehouseForm, setWarehouseForm] = useState<WarehouseFormState>(DEFAULT_WAREHOUSE_FORM);
   const [warehouseStations, setWarehouseStations] = useState<StationInfo[]>([]);
@@ -313,6 +366,7 @@ export function ImportExportTab({ isLoggedIn }: Props) {
   const [transitDraftMode, setTransitDraftMode] = useState<TransitDraftMode>("search");
   const [transitItemQuantity, setTransitItemQuantity] = useState(1);
   const [transitClipboardText, setTransitClipboardText] = useState("");
+  const [transitClipboardStatus, setTransitClipboardStatus] = useState<{ kind: "error" | "success"; message: string } | null>(null);
   const [transitDraftItems, setTransitDraftItems] = useState<ImportExportTransitItem[]>([]);
   const [transitItemQuery, setTransitItemQuery] = useState("");
   const [transitItemResults, setTransitItemResults] = useState<ItemSearchResult[]>([]);
@@ -368,6 +422,10 @@ export function ImportExportTab({ isLoggedIn }: Props) {
     merged.sort((a, b) => a.name.localeCompare(b.name));
     return merged;
   }, [isLoggedIn, warehouseForm.include_structures, warehouseStations, warehouseStructures]);
+  const selectedWarehouseCorporation = useMemo(
+    () => warehouseCorporations.find((corp) => corp.corporation_id === warehouseForm.corporation_id) ?? null,
+    [warehouseCorporations, warehouseForm.corporation_id],
+  );
 
   const transitFromLocations = useMemo(() => {
     const merged = transitFrom.include_structures && isLoggedIn
@@ -505,19 +563,24 @@ export function ImportExportTab({ isLoggedIn }: Props) {
   }, [selectedRouteId]);
 
   const loadRestocking = useCallback(async () => {
+    setLoadingRestocking(true);
     try {
-      const [nextOverview, nextWarehouses, nextTransit] = await Promise.all([
+      const [nextOverview, nextWarehouses, nextTransit, nextWarehouseCorporations] = await Promise.all([
         getImportExportRestockingOverview(),
         getImportExportWarehouses(),
         getImportExportTransitEntries(),
+        getImportExportWarehouseCorporations().catch(() => []),
       ]);
       setRestockingOverview(nextOverview);
       setRestockingStale(false);
       setWarehouses(nextWarehouses);
       setTransitEntries(nextTransit);
+      setWarehouseCorporations(nextWarehouseCorporations);
       setExpandedWarehouseIds((prev) => prev.filter((id) => nextWarehouses.some((warehouse) => warehouse.id === id)));
     } catch (e) {
       setError(e instanceof Error ? e.message : "Failed to load restocking data");
+    } finally {
+      setLoadingRestocking(false);
     }
   }, []);
 
@@ -1136,6 +1199,10 @@ export function ImportExportTab({ isLoggedIn }: Props) {
       setError("Choose a warehouse system and location.");
       return;
     }
+    if (warehouseForm.owner_kind === "corporation" && warehouseForm.corporation_id <= 0) {
+      setError("Choose which corporation owns this warehouse.");
+      return;
+    }
     setSavingWarehouse(true);
     setError("");
     try {
@@ -1146,6 +1213,9 @@ export function ImportExportTab({ isLoggedIn }: Props) {
         location_id: warehouseForm.location_id,
         location_name: warehouseForm.location_name.trim(),
         is_structure: warehouseForm.is_structure,
+        owner_kind: warehouseForm.owner_kind,
+        corporation_id: warehouseForm.owner_kind === "corporation" ? warehouseForm.corporation_id : 0,
+        corporation_name: warehouseForm.owner_kind === "corporation" ? warehouseForm.corporation_name.trim() : "",
       });
       setWarehouses((prev) => [created, ...prev.filter((warehouse) => warehouse.id !== created.id)]);
       setWarehouseForm(DEFAULT_WAREHOUSE_FORM);
@@ -1202,19 +1272,30 @@ export function ImportExportTab({ isLoggedIn }: Props) {
     setTransitItemQuantity(1);
   }, [selectedTransitItem, transitItemQuantity]);
 
-  const handleImportTransitClipboard = useCallback(() => {
+  const handleImportTransitClipboard = useCallback(async () => {
     const parsed = parseTransitClipboard(transitClipboardText);
-    if (parsed.length === 0) {
-      setError("Clipboard mode could not parse any item lines.");
+    setTransitClipboardStatus(null);
+    if (parsed.errors.length > 0) {
+      const detail = parsed.errors.slice(0, 3).join(" ");
+      const suffix = parsed.errors.length > 3 ? ` (+${parsed.errors.length - 3} more)` : "";
+      const message = `Clipboard mode could not parse the import text. ${detail}${suffix}`;
+      setTransitClipboardStatus({ kind: "error", message });
+      setError(message);
       return;
     }
-    const trackedByName = new Map(allTrackedItems.map((item) => [item.type_name.toLowerCase(), item]));
-    const unresolved: string[] = [];
+    if (parsed.entries.length === 0) {
+      const message = 'Clipboard mode could not find any "<item> x <quantity>" lines.';
+      setTransitClipboardStatus({ kind: "error", message });
+      setError(message);
+      return;
+    }
+    const trackedByName = new Map(allTrackedItems.map((item) => [normalizeItemName(item.type_name), item]));
     const nextItems = new Map<number, ImportExportTransitItem>();
-    for (const entry of parsed) {
-      const matched = trackedByName.get(entry.type_name.toLowerCase());
+    const unresolvedEntries: Array<{ type_name: string; quantity: number }> = [];
+    for (const entry of parsed.entries) {
+      const matched = trackedByName.get(normalizeItemName(entry.type_name));
       if (!matched) {
-        unresolved.push(entry.type_name);
+        unresolvedEntries.push(entry);
         continue;
       }
       const existing = nextItems.get(matched.type_id);
@@ -1224,8 +1305,45 @@ export function ImportExportTab({ isLoggedIn }: Props) {
         quantity: (existing?.quantity ?? 0) + entry.quantity,
       });
     }
-    if (unresolved.length > 0) {
-      setError(`Could not match tracked items: ${unresolved.join(", ")}`);
+
+    if (unresolvedEntries.length > 0) {
+      const fallbackMatches = await Promise.all(unresolvedEntries.map(async (entry) => {
+        try {
+          const results = await searchItems(entry.type_name, 20);
+          return results.find((item) => normalizeItemName(item.type_name) === normalizeItemName(entry.type_name)) ?? null;
+        } catch {
+          return null;
+        }
+      }));
+
+      const stillUnresolved: string[] = [];
+      for (let index = 0; index < unresolvedEntries.length; index += 1) {
+        const entry = unresolvedEntries[index];
+        const matched = fallbackMatches[index];
+        if (!entry || !matched) {
+          if (entry) stillUnresolved.push(entry.type_name);
+          continue;
+        }
+        const existing = nextItems.get(matched.type_id);
+        nextItems.set(matched.type_id, {
+          type_id: matched.type_id,
+          type_name: matched.type_name,
+          quantity: (existing?.quantity ?? 0) + entry.quantity,
+        });
+      }
+
+      if (stillUnresolved.length > 0) {
+        const message = `Parsed ${parsed.entries.length} item lines, but could not resolve item names: ${stillUnresolved.join(", ")}`;
+        setTransitClipboardStatus({ kind: "error", message });
+        setError(message);
+        return;
+      }
+    }
+
+    if (nextItems.size === 0) {
+      const message = "Clipboard import did not resolve any items.";
+      setTransitClipboardStatus({ kind: "error", message });
+      setError(message);
       return;
     }
     setTransitDraftItems((prev) => {
@@ -1239,6 +1357,9 @@ export function ImportExportTab({ isLoggedIn }: Props) {
       }
       return Array.from(merged.values()).sort((a, b) => a.type_name.localeCompare(b.type_name));
     });
+    const message = `Imported ${parsed.entries.length} item lines from clipboard.`;
+    setTransitClipboardStatus({ kind: "success", message });
+    setError("");
     setTransitClipboardText("");
   }, [allTrackedItems, transitClipboardText]);
 
@@ -2269,10 +2390,13 @@ export function ImportExportTab({ isLoggedIn }: Props) {
                   <button
                     type="button"
                     onClick={() => void loadRestocking()}
-                    disabled={savingWarehouse || savingTransit}
-                    className="px-3 py-1.5 rounded-sm border border-eve-border text-xs uppercase tracking-[0.12em] hover:bg-eve-panel-hover disabled:opacity-50"
+                    disabled={loadingRestocking || savingWarehouse || savingTransit}
+                    className="inline-flex items-center gap-2 px-3 py-1.5 rounded-sm border border-eve-border text-xs uppercase tracking-[0.12em] hover:bg-eve-panel-hover disabled:opacity-50"
                   >
-                    Refresh
+                    {loadingRestocking && (
+                      <span className="inline-block h-3 w-3 animate-spin rounded-full border border-eve-dim border-t-eve-accent" />
+                    )}
+                    {loadingRestocking ? "Refreshing..." : "Refresh"}
                   </button>
                 </div>
                 <div className="grid grid-cols-1 xl:grid-cols-4 gap-3">
@@ -2301,7 +2425,25 @@ export function ImportExportTab({ isLoggedIn }: Props) {
                   defaultExpanded
                   persistKey="import-export-restocking-warehouses"
                 >
-                  <div className="grid grid-cols-1 xl:grid-cols-[minmax(0,1fr)_minmax(0,1fr)_auto] gap-3 items-end">
+                  <div className="grid grid-cols-1 xl:grid-cols-[minmax(0,0.7fr)_minmax(0,1fr)_minmax(0,1fr)_auto] gap-3 items-end">
+                    <SettingsField label="Owner">
+                      <select
+                        value={warehouseForm.owner_kind}
+                        onChange={(e) => {
+                          const ownerKind = e.target.value === "corporation" ? "corporation" : "character";
+                          setWarehouseForm((prev) => ({
+                            ...prev,
+                            owner_kind: ownerKind,
+                            corporation_id: ownerKind === "corporation" ? prev.corporation_id : 0,
+                            corporation_name: ownerKind === "corporation" ? prev.corporation_name : "",
+                          }));
+                        }}
+                        className="w-full px-3 py-1.5 bg-eve-input border border-eve-border rounded-sm text-eve-text text-sm"
+                      >
+                        <option value="character">Personal</option>
+                        <option value="corporation">Corporation</option>
+                      </select>
+                    </SettingsField>
                     <SettingsField label="System">
                       <SystemAutocomplete
                         value={warehouseForm.system_name}
@@ -2350,6 +2492,33 @@ export function ImportExportTab({ isLoggedIn }: Props) {
                         ))}
                       </select>
                     </SettingsField>
+                    <SettingsField label="Corporation">
+                      <select
+                        value={String(warehouseForm.corporation_id || 0)}
+                        onChange={(e) => {
+                          const nextCorpID = Number(e.target.value) || 0;
+                          const corporation = warehouseCorporations.find((entry) => entry.corporation_id === nextCorpID) ?? null;
+                          setWarehouseForm((prev) => ({
+                            ...prev,
+                            corporation_id: nextCorpID,
+                            corporation_name: corporation?.corporation_name ?? "",
+                          }));
+                        }}
+                        disabled={warehouseForm.owner_kind !== "corporation"}
+                        className="w-full px-3 py-1.5 bg-eve-input border border-eve-border rounded-sm text-eve-text text-sm disabled:opacity-50"
+                      >
+                        <option value="0">
+                          {warehouseForm.owner_kind === "corporation"
+                            ? (warehouseCorporations.length > 0 ? "Select corporation" : "No logged-in corporation access found")
+                            : "Not needed for personal warehouses"}
+                        </option>
+                        {warehouseCorporations.map((corporation) => (
+                          <option key={corporation.corporation_id} value={corporation.corporation_id}>
+                            {corporation.corporation_name}
+                          </option>
+                        ))}
+                      </select>
+                    </SettingsField>
                     <button
                       type="button"
                       onClick={() => void handleCreateWarehouse()}
@@ -2359,6 +2528,11 @@ export function ImportExportTab({ isLoggedIn }: Props) {
                       Add Warehouse
                     </button>
                   </div>
+                  {warehouseForm.owner_kind === "corporation" && selectedWarehouseCorporation && (
+                    <div className="mt-2 text-[11px] text-eve-dim">
+                      Accessible via: {selectedWarehouseCorporation.character_names.join(", ")}
+                    </div>
+                  )}
 
                   <div className="mt-3 space-y-2">
                     {warehouses.length === 0 && (
@@ -2379,6 +2553,11 @@ export function ImportExportTab({ isLoggedIn }: Props) {
                               <div className="text-sm text-eve-text">{warehouse.name}</div>
                               <div className="text-[11px] text-eve-dim">
                                 {warehouse.system_name} / {warehouse.location_name}
+                              </div>
+                              <div className="text-[11px] text-eve-dim">
+                                {warehouse.owner_kind === "corporation"
+                                  ? `Corporation: ${warehouse.corporation_name || warehouse.corporation_id}`
+                                  : "Owner: Personal"}
                               </div>
                             </button>
                             <button
@@ -2609,13 +2788,28 @@ export function ImportExportTab({ isLoggedIn }: Props) {
                             </div>
                             <textarea
                               value={transitClipboardText}
-                              onChange={(e) => setTransitClipboardText(e.target.value)}
+                              onChange={(e) => {
+                                setTransitClipboardText(e.target.value);
+                                if (transitClipboardStatus) setTransitClipboardStatus(null);
+                              }}
                               rows={5}
                               className="w-full px-3 py-2 bg-eve-input border border-eve-border rounded-sm text-eve-text text-sm"
                             />
+                            {transitClipboardStatus && (
+                              <div
+                                className={cn(
+                                  "rounded-sm border px-3 py-2 text-sm",
+                                  transitClipboardStatus.kind === "error"
+                                    ? "border-eve-error/40 bg-eve-error/10 text-eve-error"
+                                    : "border-eve-accent/40 bg-eve-accent/10 text-eve-accent",
+                                )}
+                              >
+                                {transitClipboardStatus.message}
+                              </div>
+                            )}
                             <button
                               type="button"
-                              onClick={handleImportTransitClipboard}
+                              onClick={() => void handleImportTransitClipboard()}
                               disabled={!transitClipboardText.trim()}
                               className="px-3 py-1.5 rounded-sm bg-eve-accent/15 text-eve-accent text-xs uppercase tracking-[0.12em] disabled:opacity-40"
                             >

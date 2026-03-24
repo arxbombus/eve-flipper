@@ -11,8 +11,9 @@ import (
 
 const importExportSCCSurchargePercent = 0.5
 const (
-	importExportShippingPerRoute = "per_route"
-	importExportShippingPerJump  = "per_jump"
+	importExportShippingPerRoute  = "per_route"
+	importExportShippingPerJump   = "per_jump"
+	importExportBuyFillWindowDays = 14
 )
 
 type ImportExportRouteAnalysis struct {
@@ -28,6 +29,7 @@ type ImportExportScenarioBrief struct {
 	Key                          string  `json:"key"`
 	Label                        string  `json:"label"`
 	TradeMode                    string  `json:"trade_mode"`
+	BuyFillChancePercent         float64 `json:"buy_fill_chance_percent,omitempty"`
 	PurchaseUnits                int32   `json:"purchase_units"`
 	SourcePrice                  float64 `json:"source_price"`
 	SourceGross                  float64 `json:"source_gross"`
@@ -74,12 +76,17 @@ func importExportScenarioMeta(mode string) (string, string) {
 	}
 }
 
-func importExportScenarioBrief(mode string, row FlipResult) ImportExportScenarioBrief {
+func importExportScenarioBrief(mode string, row FlipResult, sourceStats regionalHistoryStats) ImportExportScenarioBrief {
 	key, label := importExportScenarioMeta(mode)
+	buyFillChance := 0.0
+	if key == TradeModeBuyOrderToSell {
+		buyFillChance = importExportBuyFillChancePercent(row.DaySourceAvgPrice, row.UnitsToBuy, sourceStats)
+	}
 	return ImportExportScenarioBrief{
 		Key:                          key,
 		Label:                        label,
 		TradeMode:                    key,
+		BuyFillChancePercent:         buyFillChance,
 		PurchaseUnits:                row.UnitsToBuy,
 		SourcePrice:                  row.DaySourceAvgPrice,
 		SourceGross:                  row.DaySourceGross,
@@ -201,13 +208,13 @@ func (s *Scanner) AnalyzeImportExportRoute(route config.ImportExportRoute, items
 		}
 		enrichedRows := s.importExportRowsForMode(scenarioParams, rawRows, historyByType, itemMeta)
 		for _, row := range enrichedRows {
-			scenariosByType[row.TypeID] = append(scenariosByType[row.TypeID], importExportScenarioBrief(mode, row))
+			scenariosByType[row.TypeID] = append(scenariosByType[row.TypeID], importExportScenarioBrief(mode, row, historyByType[row.TypeID].source))
 		}
 		if mode == TradeModeBuyOrderToSell && route.SourceRegionID == 10000002 {
 			for _, row := range enrichedRows {
 				scenariosByType[row.TypeID] = append(
 					scenariosByType[row.TypeID],
-					importExportStructureBuyScenarioBrief(row),
+					importExportStructureBuyScenarioBrief(row, historyByType[row.TypeID].source),
 				)
 			}
 		}
@@ -973,7 +980,7 @@ func routeShippingMode(params ScanParams) string {
 	return importExportShippingPerRoute
 }
 
-func importExportStructureBuyScenarioBrief(row FlipResult) ImportExportScenarioBrief {
+func importExportStructureBuyScenarioBrief(row FlipResult, sourceStats regionalHistoryStats) ImportExportScenarioBrief {
 	sourceGross := row.DaySourceGross
 	if sourceGross <= 0 {
 		sourceGross = row.DaySourceAvgPrice * float64(row.UnitsToBuy)
@@ -1010,6 +1017,7 @@ func importExportStructureBuyScenarioBrief(row FlipResult) ImportExportScenarioB
 		Key:                          "buy_order_sell_order_structure",
 		Label:                        "Buy Orders In Player Structures",
 		TradeMode:                    TradeModeBuyOrderToSell,
+		BuyFillChancePercent:         importExportBuyFillChancePercent(row.DaySourceAvgPrice, row.UnitsToBuy, sourceStats),
 		PurchaseUnits:                row.UnitsToBuy,
 		SourcePrice:                  row.DaySourceAvgPrice,
 		SourceGross:                  sanitizeFloat(sourceGross),
@@ -1039,4 +1047,76 @@ func importExportStructureBuyScenarioBrief(row FlipResult) ImportExportScenarioB
 		TargetDOS:                    row.DayTargetDOS,
 		TradeScore:                   row.DayTradeScore,
 	}
+}
+
+func importExportBuyFillChancePercent(buyPrice float64, purchaseUnits int32, sourceStats regionalHistoryStats) float64 {
+	if buyPrice <= 0 || len(sourceStats.entries) == 0 {
+		return 0
+	}
+	window := filterLastNDays(sourceStats.entries, importExportBuyFillWindowDays)
+	if len(window) == 0 {
+		window = sourceStats.entries
+	}
+	lowAvg := 0.0
+	avgAvg := 0.0
+	highAvg := 0.0
+	validDays := 0.0
+	for _, entry := range window {
+		if entry.Lowest <= 0 || entry.Average <= 0 || entry.Highest <= 0 {
+			continue
+		}
+		lowAvg += entry.Lowest
+		avgAvg += entry.Average
+		highAvg += entry.Highest
+		validDays++
+	}
+	if validDays <= 0 {
+		return 0
+	}
+	lowAvg /= validDays
+	avgAvg /= validDays
+	highAvg /= validDays
+	if avgAvg < lowAvg {
+		avgAvg = lowAvg
+	}
+	if highAvg < avgAvg {
+		highAvg = avgAvg
+	}
+
+	priceScore := 0.0
+	if buyPrice <= lowAvg {
+		priceScore = 0
+	} else if buyPrice < avgAvg {
+		denom := avgAvg - lowAvg
+		if denom <= 0 {
+			priceScore = 0.5
+		} else {
+			priceScore = 0.5 * ((buyPrice - lowAvg) / denom)
+		}
+	} else if buyPrice < highAvg {
+		denom := highAvg - avgAvg
+		if denom <= 0 {
+			priceScore = 1
+		} else {
+			priceScore = 0.5 + 0.5*((buyPrice-avgAvg)/denom)
+		}
+	} else {
+		priceScore = 1
+	}
+
+	volumePerDay := avgDailyVolume(window, importExportBuyFillWindowDays)
+	volumeScale := math.Max(10, float64(maxInt32(1, purchaseUnits))*8)
+	volumeScore := 1 - math.Exp(-volumePerDay/volumeScale)
+	coverageScore := math.Min(1, validDays/float64(importExportBuyFillWindowDays))
+
+	// Keep a floor for active markets so price placement still matters when volume is modest.
+	combined := priceScore * (0.35 + 0.65*volumeScore) * (0.5 + 0.5*coverageScore)
+	return sanitizeFloat(math.Max(0, math.Min(100, combined*100)))
+}
+
+func maxInt32(a, b int32) int32 {
+	if a > b {
+		return a
+	}
+	return b
 }

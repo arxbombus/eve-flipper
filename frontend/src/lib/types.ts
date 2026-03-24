@@ -357,6 +357,17 @@ export interface StationInfo {
   is_structure?: boolean;
 }
 
+export interface PortfolioShippingRule {
+  id: number;
+  location_id: number;
+  location_name: string;
+  system_id: number;
+  system_name: string;
+  cost_per_m3: number;
+  created_at: string;
+  updated_at: string;
+}
+
 export interface StationsResponse {
   stations: StationInfo[];
   region_id: number;
@@ -467,6 +478,7 @@ export interface ImportExportScenarioBrief {
   key: string;
   label: string;
   trade_mode: RegionalTradeMode;
+  buy_fill_chance_percent?: number;
   purchase_units: number;
   source_price: number;
   source_gross: number;
@@ -514,8 +526,18 @@ export interface ImportExportWarehouse {
   location_id: number;
   location_name: string;
   is_structure: boolean;
+  owner_kind: "character" | "corporation";
+  corporation_id: number;
+  corporation_name: string;
   created_at: string;
   updated_at: string;
+}
+
+export interface ImportExportWarehouseCorporation {
+  corporation_id: number;
+  corporation_name: string;
+  character_ids: number[];
+  character_names: string[];
 }
 
 export interface ImportExportTransitItem {
@@ -1512,6 +1534,7 @@ export interface DailyPnLEntry {
   date: string;
   buy_total: number;
   sell_total: number;
+  shipping_total: number;
   net_pnl: number;
   cumulative_pnl: number;
   drawdown_pct: number;
@@ -1548,6 +1571,7 @@ export interface PortfolioPnLStats {
   open_cost_basis: number;
   total_fees: number;
   total_taxes: number;
+  total_shipping: number;
 }
 
 export interface StationPnL {
@@ -1555,6 +1579,7 @@ export interface StationPnL {
   location_name: string;
   total_bought: number;
   total_sold: number;
+  shipping_total: number;
   net_pnl: number;
   transactions: number;
 }
@@ -1564,6 +1589,7 @@ export interface ItemPnL {
   type_name: string;
   total_bought: number;
   total_sold: number;
+  shipping_total: number;
   net_pnl: number;
   qty_bought: number;
   qty_sold: number;
@@ -1595,6 +1621,7 @@ export interface RealizedTrade {
   sell_tax: number;
   buy_total: number;
   sell_total: number;
+  shipping_cost: number;
   realized_pnl: number;
   margin_percent: number;
   unmatched?: boolean;
@@ -1627,6 +1654,7 @@ export interface PortfolioSettings {
   sales_tax_percent: number;
   broker_fee_percent: number;
   ledger_limit: number;
+  shipping_rule_count: number;
   include_unmatched_sell: boolean;
 }
 

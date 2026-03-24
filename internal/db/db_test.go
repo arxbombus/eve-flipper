@@ -192,6 +192,80 @@ func TestDB_StationResultsRoundTrip_WithExecutionFields(t *testing.T) {
 	}
 }
 
+func TestDB_MigrateV28_ImportExportWarehouseOwnershipColumns(t *testing.T) {
+	sqlDB, err := sql.Open("sqlite", ":memory:?_pragma=journal_mode(WAL)&_pragma=busy_timeout(5000)")
+	if err != nil {
+		t.Fatalf("open in-memory db: %v", err)
+	}
+	defer sqlDB.Close()
+
+	if _, err := sqlDB.Exec(`
+		CREATE TABLE schema_version (version INTEGER PRIMARY KEY);
+		INSERT INTO schema_version(version) VALUES (28);
+		CREATE TABLE import_export_warehouses (
+			id            INTEGER PRIMARY KEY AUTOINCREMENT,
+			user_id       TEXT NOT NULL,
+			name          TEXT NOT NULL,
+			system_id     INTEGER NOT NULL,
+			system_name   TEXT NOT NULL,
+			location_id   INTEGER NOT NULL,
+			location_name TEXT NOT NULL,
+			is_structure  INTEGER NOT NULL DEFAULT 0,
+			created_at    TEXT NOT NULL,
+			updated_at    TEXT NOT NULL
+		);
+		CREATE UNIQUE INDEX idx_import_export_warehouses_user_location
+			ON import_export_warehouses(user_id, location_id);
+	`); err != nil {
+		t.Fatalf("seed legacy v28 schema: %v", err)
+	}
+
+	d := &DB{sql: sqlDB}
+	if err := d.migrate(); err != nil {
+		t.Fatalf("migrate legacy v28 schema: %v", err)
+	}
+
+	personal, err := d.CreateImportExportWarehouseForUser("default", config.ImportExportWarehouse{
+		Name:         "Personal Jita",
+		SystemID:     30000142,
+		SystemName:   "Jita",
+		LocationID:   60003760,
+		LocationName: "Jita IV - Moon 4 - Caldari Navy Assembly Plant",
+		OwnerKind:    "character",
+	})
+	if err != nil {
+		t.Fatalf("create personal warehouse: %v", err)
+	}
+	if personal.OwnerKind != "character" {
+		t.Fatalf("personal OwnerKind = %q, want character", personal.OwnerKind)
+	}
+
+	corporate, err := d.CreateImportExportWarehouseForUser("default", config.ImportExportWarehouse{
+		Name:            "Corp Jita",
+		SystemID:        30000142,
+		SystemName:      "Jita",
+		LocationID:      60003760,
+		LocationName:    "Jita IV - Moon 4 - Caldari Navy Assembly Plant",
+		OwnerKind:       "corporation",
+		CorporationID:   98000001,
+		CorporationName: "Acme Logistics",
+	})
+	if err != nil {
+		t.Fatalf("create corporate warehouse: %v", err)
+	}
+	if corporate.CorporationID != 98000001 || corporate.CorporationName != "Acme Logistics" {
+		t.Fatalf("corporate ownership = %d/%q", corporate.CorporationID, corporate.CorporationName)
+	}
+
+	warehouses, err := d.ListImportExportWarehousesForUser("default")
+	if err != nil {
+		t.Fatalf("list warehouses: %v", err)
+	}
+	if len(warehouses) != 2 {
+		t.Fatalf("len(warehouses) = %d, want 2", len(warehouses))
+	}
+}
+
 func TestDB_Migrate_StationResultsHasExecutionColumns(t *testing.T) {
 	d := openTestDB(t)
 	defer d.Close()

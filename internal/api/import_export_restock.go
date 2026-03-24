@@ -88,6 +88,17 @@ type importExportRestockingOverview struct {
 	Items      []importExportRestockingItemSummary   `json:"items"`
 }
 
+type importExportWarehouseStockKey struct {
+	OwnerKind     string
+	CorporationID int32
+	LocationID    int64
+}
+
+type importExportCorporationAssetAccess struct {
+	CorporationID int32
+	Token         string
+}
+
 func (s *Server) handleGetImportExportRestockingOverview(w http.ResponseWriter, r *http.Request) {
 	userID := userIDFromRequest(r)
 
@@ -140,9 +151,26 @@ func (s *Server) handleGetImportExportRestockingOverview(w http.ResponseWriter, 
 		}
 	}
 
-	warehouseStockByLocation := make(map[int64]map[int32]int64, len(warehouses))
+	warehouseStockByKey := make(map[importExportWarehouseStockKey]map[int32]int64, len(warehouses))
+	warehouseStockByID := make(map[int64]map[int32]int64, len(warehouses))
+	personalWarehouseKeysByLocation := make(map[int64][]importExportWarehouseStockKey, len(warehouses))
+	corporationWarehouseKeysByCorpAndLocation := make(map[int32]map[int64][]importExportWarehouseStockKey)
+	corporationWarehousesNeeded := make(map[int32]bool)
 	for _, warehouse := range warehouses {
-		warehouseStockByLocation[warehouse.LocationID] = make(map[int32]int64)
+		key := importExportWarehouseKey(warehouse)
+		warehouseStockByKey[key] = make(map[int32]int64)
+		warehouseStockByID[warehouse.ID] = warehouseStockByKey[key]
+		if warehouse.OwnerKind == "corporation" && warehouse.CorporationID > 0 {
+			corporationWarehousesNeeded[warehouse.CorporationID] = true
+			byLocation := corporationWarehouseKeysByCorpAndLocation[warehouse.CorporationID]
+			if byLocation == nil {
+				byLocation = make(map[int64][]importExportWarehouseStockKey)
+				corporationWarehouseKeysByCorpAndLocation[warehouse.CorporationID] = byLocation
+			}
+			byLocation[warehouse.LocationID] = append(byLocation[warehouse.LocationID], key)
+			continue
+		}
+		personalWarehouseKeysByLocation[warehouse.LocationID] = append(personalWarehouseKeysByLocation[warehouse.LocationID], key)
 	}
 	warehouseStockByType := make(map[int32]int64, len(typeIDs))
 	orderViews := make([]importExportRestockingOrder, 0)
@@ -166,6 +194,7 @@ func (s *Server) handleGetImportExportRestockingOverview(w http.ResponseWriter, 
 	if len(typeIDs) > 0 && s.sessions != nil && s.esi != nil && s.sso != nil {
 		sessions := s.sessions.ListForUser(userID)
 		locationIDs := make(map[int64]bool)
+		corporationAssetAccessByCorp := make(map[int32][]importExportCorporationAssetAccess)
 		for _, sess := range sessions {
 			token, tokenErr := s.sessions.EnsureValidTokenForUserCharacter(s.sso, userID, sess.CharacterID)
 			if tokenErr != nil {
@@ -208,30 +237,28 @@ func (s *Server) handleGetImportExportRestockingOverview(w http.ResponseWriter, 
 
 			assets, assetsErr := s.esi.GetCharacterAssets(sess.CharacterID, token)
 			if assetsErr == nil {
-				assetByItemID := make(map[int64]esi.CharacterAsset, len(assets))
+				parentLocationByItemID := make(map[int64]int64, len(assets))
 				for _, asset := range assets {
 					if asset.ItemID > 0 {
-						assetByItemID[asset.ItemID] = asset
+						parentLocationByItemID[asset.ItemID] = asset.LocationID
 					}
 				}
 				for _, asset := range assets {
 					if _, ok := tracked[asset.TypeID]; !ok || asset.IsBlueprintCopy {
 						continue
 					}
-					qty := asset.Quantity
+					qty := importExportAssetQuantity(asset.Quantity, asset.IsSingleton)
 					if qty <= 0 {
-						if asset.IsSingleton {
-							qty = 1
-						} else {
-							continue
-						}
-					}
-					rootLocationID := resolveAssetRootLocationID(asset.LocationID, assetByItemID)
-					stockByType, ok := warehouseStockByLocation[rootLocationID]
-					if !ok {
 						continue
 					}
-					stockByType[asset.TypeID] += qty
+					rootLocationID := importExportResolveAssetRootLocationID(asset.LocationID, parentLocationByItemID)
+					warehouseKeys := personalWarehouseKeysByLocation[rootLocationID]
+					if len(warehouseKeys) == 0 {
+						continue
+					}
+					for _, warehouseKey := range warehouseKeys {
+						warehouseStockByKey[warehouseKey][asset.TypeID] += qty
+					}
 					warehouseStockByType[asset.TypeID] += qty
 					for _, route := range routes {
 						if warehouseLocationMatchesImportExportRouteDestination(rootLocationID, route, targetRegionByRoute[route.ID], s) {
@@ -239,6 +266,59 @@ func (s *Server) handleGetImportExportRestockingOverview(w http.ResponseWriter, 
 						}
 					}
 				}
+			}
+
+			if len(corporationWarehousesNeeded) > 0 {
+				corporationID, corporationErr := s.esi.GetCharacterCorporationID(sess.CharacterID)
+				if corporationErr == nil && corporationWarehousesNeeded[corporationID] {
+					corporationAssetAccessByCorp[corporationID] = append(corporationAssetAccessByCorp[corporationID], importExportCorporationAssetAccess{
+						CorporationID: corporationID,
+						Token:         token,
+					})
+				}
+			}
+		}
+
+		for corporationID := range corporationWarehousesNeeded {
+			candidates := corporationAssetAccessByCorp[corporationID]
+			if len(candidates) == 0 {
+				continue
+			}
+			for _, candidate := range candidates {
+				assets, assetsErr := s.esi.GetCorporationAssets(corporationID, candidate.Token)
+				if assetsErr != nil {
+					continue
+				}
+				parentLocationByItemID := make(map[int64]int64, len(assets))
+				for _, asset := range assets {
+					if asset.ItemID > 0 {
+						parentLocationByItemID[asset.ItemID] = asset.LocationID
+					}
+				}
+				for _, asset := range assets {
+					if _, ok := tracked[asset.TypeID]; !ok || asset.IsBlueprintCopy {
+						continue
+					}
+					qty := importExportAssetQuantity(asset.Quantity, asset.IsSingleton)
+					if qty <= 0 {
+						continue
+					}
+					rootLocationID := importExportResolveAssetRootLocationID(asset.LocationID, parentLocationByItemID)
+					warehouseKeys := corporationWarehouseKeysByCorpAndLocation[corporationID][rootLocationID]
+					if len(warehouseKeys) == 0 {
+						continue
+					}
+					for _, warehouseKey := range warehouseKeys {
+						warehouseStockByKey[warehouseKey][asset.TypeID] += qty
+					}
+					warehouseStockByType[asset.TypeID] += qty
+					for _, route := range routes {
+						if warehouseLocationMatchesImportExportRouteDestination(rootLocationID, route, targetRegionByRoute[route.ID], s) {
+							destinationStockByRouteAndType[route.ID][asset.TypeID] += qty
+						}
+					}
+				}
+				break
 			}
 		}
 
@@ -349,7 +429,7 @@ func (s *Server) handleGetImportExportRestockingOverview(w http.ResponseWriter, 
 		items := make([]importExportRestockingWarehouseItem, 0, len(typeIDs))
 		for _, typeID := range typeIDs {
 			meta := tracked[typeID]
-			qty := warehouseStockByLocation[warehouse.LocationID][typeID]
+			qty := warehouseStockByID[warehouse.ID][typeID]
 			items = append(items, importExportRestockingWarehouseItem{
 				TypeID:    typeID,
 				TypeName:  meta.TypeName,
@@ -401,7 +481,7 @@ func (s *Server) handleGetImportExportRestockingOverview(w http.ResponseWriter, 
 		suggestedBuyQty := int64(0)
 		remainingWarehouseQty := make(map[int64]int64, len(warehouses))
 		for _, warehouse := range warehouses {
-			remainingWarehouseQty[warehouse.ID] = warehouseStockByLocation[warehouse.LocationID][typeID]
+			remainingWarehouseQty[warehouse.ID] = warehouseStockByID[warehouse.ID][typeID]
 		}
 		for i := range routeBreakdowns {
 			if routeBreakdowns[i].TransferSuggestions == nil {
@@ -500,6 +580,41 @@ func (s *Server) handleGetImportExportRestockingOverview(w http.ResponseWriter, 
 		Transit:    transitEntries,
 		Items:      itemSummaries,
 	})
+}
+
+func importExportWarehouseKey(warehouse config.ImportExportWarehouse) importExportWarehouseStockKey {
+	return importExportWarehouseStockKey{
+		OwnerKind:     warehouse.OwnerKind,
+		CorporationID: warehouse.CorporationID,
+		LocationID:    warehouse.LocationID,
+	}
+}
+
+func importExportAssetQuantity(quantity int64, isSingleton bool) int64 {
+	if quantity > 0 {
+		return quantity
+	}
+	if isSingleton {
+		return 1
+	}
+	return 0
+}
+
+func importExportResolveAssetRootLocationID(locationID int64, parentByItemID map[int64]int64) int64 {
+	if locationID <= 0 || len(parentByItemID) == 0 {
+		return locationID
+	}
+	current := locationID
+	seen := make(map[int64]bool, 8)
+	for current > 0 && !seen[current] {
+		seen[current] = true
+		parentLocationID, ok := parentByItemID[current]
+		if !ok || parentLocationID <= 0 {
+			break
+		}
+		current = parentLocationID
+	}
+	return current
 }
 
 func orderMatchesImportExportRouteDestination(order esi.CharacterOrder, route config.ImportExportRoute, targetRegionID int32, s *Server) bool {
